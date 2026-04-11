@@ -104,12 +104,12 @@ def find_header_row(df, max_rows=100):
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
                 '收入金额', '支出金额',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
-                '交易类型', '业务类型', '流水号', '序号', '账户账号', '转出', '转入']
+                '交易类型', '业务类型', '流水号', '序号', '账户账号', '转出', '转入',
+                '交易金额', '对方账户名称']  # 新增关键词支持意大利子公司
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
             continue
-        # 检查第一个单元格是否为纯数字（可能是数据行而不是表头）
         first_cell = row_cells[0] if row_cells else ''
         if first_cell.isdigit() and len(first_cell) <= 3:
             continue
@@ -120,19 +120,15 @@ def find_header_row(df, max_rows=100):
 
 def find_header_row_for_huaoxia(df, max_rows=100):
     """专门为华夏银行查找表头行"""
-    # 首先尝试通用方法
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).strip() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
             continue
-        # 条件1：第一列为“序号”，且后续列包含“交易日期”
         if len(row_cells) >= 2:
             if row_cells[0] == '序号' and '交易日期' in row_cells[1]:
                 return i
-        # 条件2：任意位置同时包含“序号”和“交易日期”
         if any('序号' in cell for cell in row_cells) and any('交易日期' in cell for cell in row_cells):
             return i
-    # 后备方案：如果第7行（索引7）的第一个单元格为“序号”，则直接使用（针对已知文件结构）
     if len(df) > 7:
         first_cell = str(df.iloc[7, 0]).strip()
         if first_cell == '序号':
@@ -159,6 +155,24 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_date': None,
         'trans_time': None
     }
+
+    # 特殊处理：意大利子公司（中行罗马分行）
+    if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name:
+        for col in df.columns:
+            col_str = str(col).strip()
+            if col_str == '交易日期':
+                mapping['date'] = col
+            elif col_str == '交易金额':
+                mapping['amount'] = col
+            elif col_str == '对方账户名称':
+                mapping['counterparty'] = col
+            elif col_str == '交易币种':
+                mapping['currency'] = col
+            elif col_str == '摘要':
+                mapping['remark'] = col
+        # 如果找到了必要列，直接返回
+        if mapping['date'] and mapping['amount'] and mapping['counterparty']:
+            return mapping
 
     # 华夏银行精确匹配
     if '华夏' in sheet_name:
@@ -477,7 +491,7 @@ def load_all_transactions(uploaded_files):
                     debug_info.append(f"📄 {file.name}/{sheet_name} 示例: {sample['direction']} {sample['counterparty'][:30]} {sample['amount']} {sample['currency']} 日期:{sample['date']}")
                 else:
                     st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
-                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, currency={mapping['currency']}")
+                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, amount={mapping['amount']}, currency={mapping['currency']}")
                     if len(df_data) > 0:
                         sample_rows = df_data.head(3).iloc[:, :5].to_string()
                         debug_info.append(f"   前3行数据示例:\n{sample_rows}")
@@ -639,6 +653,9 @@ def main():
                     'purpose': '用途/附言',
                     'original_sheet': '来源工作表'
                 })
+                # 计算折合人民币合计
+                total_cny = df_search['amount_cny'].sum()
+                st.markdown(f"**合计折合人民币: ¥{total_cny:,.2f}**")
                 st.dataframe(display_df[['交易日期', '交易方向', '对方公司', '交易金额', '币种', '折合人民币(元)', '摘要', '用途/附言', '来源工作表']], use_container_width=True)
             else:
                 st.info("未找到匹配记录")
