@@ -156,7 +156,7 @@ def identify_columns_enhanced(df, sheet_name):
     }
 
     # 特殊处理：意大利子公司（中行罗马分行）
-    if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name:
+    if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name or '意大利' in sheet_name:
         for col in df.columns:
             col_str = str(col).strip()
             if col_str == '交易金额':
@@ -465,40 +465,63 @@ def load_all_transactions(uploaded_files):
                     continue
                 header_row = None
                 sheet_currency = None
-                # 意大利子公司特殊处理：动态查找表头和币种
-                if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name:
-                    # 查找表头行（包含“交易金额”和“对方账户名称”）
-                    for i in range(min(50, len(df_raw))):
-                        row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                        if '交易金额' in row_cells and '对方账户名称' in row_cells:
-                            header_row = i
-                            break
-                    if header_row is None:
-                        # 后备：查找包含“交易流水号”和“交易金额”的行
-                        for i in range(min(50, len(df_raw))):
-                            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                            if '交易流水号' in row_cells and '交易金额' in row_cells:
-                                header_row = i
-                                break
-                    # 查找币种（包含“货币”的行）
-                    for i in range(min(20, len(df_raw))):
-                        row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                        if '货币' in row_cells:
-                            idx = row_cells.index('货币') if '货币' in row_cells else -1
-                            if idx + 1 < len(row_cells):
-                                curr_val = row_cells[idx+1]
-                                if curr_val == '欧元':
-                                    sheet_currency = 'EUR'
-                                elif curr_val == '美元':
-                                    sheet_currency = 'USD'
-                                elif curr_val == '港币':
-                                    sheet_currency = 'HKD'
-                                break
-                else:
-                    if '华夏' in sheet_name:
-                        header_row = find_header_row_for_huaoxia(df_raw)
+                # 意大利子公司特殊处理：使用固定行位置解析，不依赖表头查找
+                if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name or '意大利' in sheet_name:
+                    debug_info.append(f"🔍 {file.name} - {sheet_name}: 使用意大利子公司专用解析器")
+                    # 获取币种（第2行第1列，索引2,0）
+                    if len(df_raw) > 2:
+                        currency_cell = str(df_raw.iloc[2, 0]).strip()
+                        if currency_cell == '欧元':
+                            sheet_currency = 'EUR'
+                        elif currency_cell == '美元':
+                            sheet_currency = 'USD'
+                        elif currency_cell == '港币':
+                            sheet_currency = 'HKD'
+                    # 表头在第3行（索引3）
+                    if len(df_raw) > 3:
+                        header_row = 3
                     else:
-                        header_row = find_header_row(df_raw)
+                        header_row = None
+                    if header_row is not None:
+                        # 读取数据
+                        df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+                        if not df_data.empty:
+                            # 直接根据列名映射
+                            mapping = {
+                                'date': '交易日期' if '交易日期' in df_data.columns else None,
+                                'amount': '交易金额' if '交易金额' in df_data.columns else None,
+                                'counterparty': '对方账户名称' if '对方账户名称' in df_data.columns else None,
+                            }
+                            # 如果列名不完全匹配，尝试使用位置（固定列索引）
+                            if mapping['date'] is None and len(df_data.columns) > 5:
+                                # 交易日期通常在列索引5（第6列）
+                                mapping['date'] = df_data.columns[5]
+                            if mapping['amount'] is None and len(df_data.columns) > 3:
+                                # 交易金额通常在列索引3（第4列）
+                                mapping['amount'] = df_data.columns[3]
+                            if mapping['counterparty'] is None and len(df_data.columns) > 8:
+                                # 对方账户名称通常在列索引8（第9列）
+                                mapping['counterparty'] = df_data.columns[8]
+                            # 解析
+                            records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
+                            filtered = [r for r in records if r['counterparty'] not in internal_companies]
+                            all_trans.extend(filtered)
+                            if filtered:
+                                st.success(f"✓ {file.name} - {sheet_name}: {len(filtered)} 条记录")
+                                sample = filtered[0]
+                                debug_info.append(f"📄 {file.name}/{sheet_name} 示例: {sample['direction']} {sample['counterparty'][:30]} {sample['amount']} {sample['currency']} 日期:{sample['date']}")
+                            else:
+                                st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
+                                debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, amount={mapping['amount']}, counterparty={mapping['counterparty']}, currency={sheet_currency}")
+                                if len(df_data) > 0:
+                                    sample_rows = df_data.head(3).iloc[:, :5].to_string()
+                                    debug_info.append(f"   前3行数据示例:\n{sample_rows}")
+                            continue  # 跳过通用解析
+                # 非意大利子公司，使用通用方法
+                if '华夏' in sheet_name:
+                    header_row = find_header_row_for_huaoxia(df_raw)
+                else:
+                    header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
                     sample = df_raw.iloc[:20, :5].to_string()
