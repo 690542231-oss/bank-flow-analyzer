@@ -76,12 +76,10 @@ def parse_date_cell(val):
             except:
                 return None
     if isinstance(val, str):
-        # 优先使用 pandas 解析（支持 "2025-11-12 16:30:18" 格式）
         try:
             return pd.to_datetime(val).date()
         except:
             pass
-        # 否则尝试常见格式
         date_part = val.split()[0] if ' ' in val else val
         for fmt in ('%Y%m%d', '%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%m/%d/%Y'):
             try:
@@ -91,8 +89,17 @@ def parse_date_cell(val):
         return None
     return None
 
+def is_summary_row(row_cells):
+    """判断一行是否为汇总/统计行（应被跳过）"""
+    summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细']
+    row_text = ' '.join(row_cells).lower()
+    for kw in summary_keywords:
+        if kw in row_text:
+            return True
+    return False
+
 def find_header_row(df, max_rows=50):
-    """查找表头行：将每一行的所有单元格转为字符串后再匹配关键词"""
+    """查找表头行：跳过汇总行，找到包含多个关键词的行"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
@@ -100,6 +107,9 @@ def find_header_row(df, max_rows=50):
                 '交易类型', '业务类型', '流水号']
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
+        # 跳过明显的汇总行
+        if is_summary_row(row_cells):
+            continue
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
@@ -237,7 +247,6 @@ def parse_sheet(df, sheet_name, mapping):
         try:
             # ---------- 日期解析 ----------
             trans_datetime = None
-            # 优先使用交易日期+时间列（中行专用）
             if '中行' in sheet_name and trans_date_col and trans_time_col:
                 date_val = row.get(trans_date_col)
                 time_val = row.get(trans_time_col)
@@ -273,12 +282,6 @@ def parse_sheet(df, sheet_name, mapping):
                 date_val = row.get(date_col)
                 parsed_date = parse_date_cell(date_val)
                 if parsed_date is None:
-                    # 如果日期列解析失败，尝试使用“记账日期”列（如果存在且不同）
-                    if '记账日期' in df.columns and date_col != '记账日期':
-                        alt_date = parse_date_cell(row.get('记账日期'))
-                        if alt_date:
-                            parsed_date = alt_date
-                if parsed_date is None:
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
 
@@ -299,7 +302,6 @@ def parse_sheet(df, sheet_name, mapping):
                     amount = amt
                     direction = 'out'
 
-            # 如果仍然没有金额，尝试从单个金额列获取
             if amount == 0:
                 amount_col = mapping.get('amount')
                 if amount_col and amount_col in df.columns:
@@ -311,7 +313,6 @@ def parse_sheet(df, sheet_name, mapping):
                         amount = -amt
                         direction = 'out'
 
-            # 辅助判断：通过交易类型
             if amount > 0 and direction is None and trans_type_col and trans_type_col in df.columns:
                 trans_type = str(row[trans_type_col]).strip()
                 if trans_type in ('往账', '支出', '付款', 'debit', '借方'):
@@ -414,10 +415,14 @@ def load_all_transactions(uploaded_files):
                 header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
-                    # 尝试输出前10行原始数据的前5列供调试
-                    sample = df_raw.iloc[:10, :5].to_string()
-                    debug_info.append(f"   前10行预览:\n{sample}")
+                    # 输出前15行原始数据前5列供调试
+                    sample = df_raw.iloc[:15, :5].to_string()
+                    debug_info.append(f"   前15行预览:\n{sample}")
                     continue
+                debug_info.append(f"✅ {file.name} - {sheet_name}: 表头行索引 = {header_row}")
+                # 输出表头行内容
+                header_content = df_raw.iloc[header_row, :10].to_string()
+                debug_info.append(f"   表头内容: {header_content}")
                 df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
                 if df_data.empty:
                     continue
@@ -432,14 +437,13 @@ def load_all_transactions(uploaded_files):
                 else:
                     st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
                     debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, currency={mapping['currency']}")
-                    # 输出前3行数据（前5列）帮助调试
                     if len(df_data) > 0:
                         sample_rows = df_data.head(3).iloc[:, :5].to_string()
                         debug_info.append(f"   前3行数据示例:\n{sample_rows}")
             except Exception as e:
                 st.error(f"解析失败 {file.name} - {sheet_name}: {str(e)}")
     with st.sidebar.expander("🔧 调试信息", expanded=False):
-        for info in debug_info[:50]:
+        for info in debug_info[:80]:
             st.text(info)
     return all_trans
 
