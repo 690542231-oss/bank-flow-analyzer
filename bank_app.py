@@ -114,14 +114,9 @@ def find_header_row(df, max_rows=80):
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
-    # 备用方案：寻找同时包含“交易日期”和“支出金额”或“收入金额”的行
+    # 备用方案：寻找同时包含“序号”和“账户账号”的行（厦门国际银行等）
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
-        if any('交易日期' in cell for cell in row_cells) and any('支出金额' in cell for cell in row_cells):
-            return i
-        if any('交易日期' in cell for cell in row_cells) and any('收入金额' in cell for cell in row_cells):
-            return i
-        # 厦门国际银行专用：同时包含“序号”和“账户账号”和“转出”/“转入”
         if any('序号' in cell for cell in row_cells) and any('账户账号' in cell for cell in row_cells):
             return i
     return None
@@ -184,7 +179,7 @@ def identify_columns_enhanced(df, sheet_name):
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
-    # 通用匹配逻辑
+    # 通用匹配逻辑（注意优先级：对方户名优先于对方行名）
     for col in df.columns:
         low = normalize_column_name(str(col))
         if not mapping['date'] and any(kw in low for kw in ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日']):
@@ -193,7 +188,11 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['trans_date'] = col
         if not mapping['trans_time'] and ('交易时间' in low or 'transactiontime' in low):
             mapping['trans_time'] = col
-        if not mapping['counterparty'] and any(kw in low for kw in ['对方户名', '对方单位名称', '收(付)方名称', '对方账户名称', '对手方户名', '对方单位']):
+        # 优先匹配“对方户名”，如果已匹配到则不再匹配其他“对方”列
+        if not mapping['counterparty']:
+            if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low:
+                mapping['counterparty'] = col
+        if not mapping['counterparty'] and any(kw in low for kw in ['对手方户名', '对方单位']):
             mapping['counterparty'] = col
         if not mapping['currency'] and any(kw in low for kw in ['币种', '交易货币', '货币']):
             mapping['currency'] = col
@@ -355,21 +354,25 @@ def parse_sheet(df, sheet_name, mapping):
 
             # ---------- 对方名称 ----------
             counterparty = ''
-            if direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
-                counterparty = str(row[payee_col]).strip()
-            elif direction == 'in' and payer_col and payer_col in df.columns and pd.notna(row[payer_col]):
-                counterparty = str(row[payer_col]).strip()
-
-            if not counterparty and cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
+            # 优先使用指定的对方户名列
+            if cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
                 candidate = str(row[cp_col]).strip()
-                # 仅排除空值，不再排除“对公往来账户”等内部科目（让用户自行决定是否过滤）
                 if candidate not in ('', 'nan', 'None'):
                     counterparty = candidate
-
-            if not counterparty and direction == 'out' and payee_col and payee_col in df.columns:
-                counterparty = str(row[payee_col]).strip()
-            if not counterparty and direction == 'in' and payer_col and payer_col in df.columns:
+            # 如果方向为收款，尝试从付款人名称获取
+            if not counterparty and direction == 'in' and payer_col and payer_col in df.columns and pd.notna(row[payer_col]):
                 counterparty = str(row[payer_col]).strip()
+            # 如果方向为付款，尝试从收款人名称获取
+            if not counterparty and direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
+                counterparty = str(row[payee_col]).strip()
+            # 兜底：尝试从“对方账户名称”列获取（厦门国际银行可能使用此列）
+            if not counterparty:
+                for col in df.columns:
+                    if '对方账户名称' in str(col) or '对方户名' in str(col):
+                        val = row.get(col)
+                        if pd.notna(val) and str(val).strip() not in ('', 'nan', 'None'):
+                            counterparty = str(val).strip()
+                            break
 
             if not counterparty:
                 continue
