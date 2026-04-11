@@ -119,14 +119,24 @@ def find_header_row(df, max_rows=100):
     return None
 
 def find_header_row_for_huaoxia(df, max_rows=100):
-    """专门为华夏银行查找表头行（包含“序号”和“交易日期”）"""
+    """专门为华夏银行查找表头行：寻找包含“序号”和“交易日期”的行"""
     for i in range(min(max_rows, len(df))):
-        row_cells = [str(cell).lower() for cell in df.iloc[i]]
+        row_cells = [str(cell).strip() for cell in df.iloc[i]]
+        # 跳过明显的汇总行
         if is_summary_row(row_cells):
             continue
-        has_xuhao = any('序号' in cell for cell in row_cells)
-        has_date = any('交易日期' in cell for cell in row_cells)
-        if has_xuhao and has_date:
+        # 检查第一个单元格是否为“序号”（精确匹配或包含）
+        first_cell = row_cells[0] if len(row_cells) > 0 else ''
+        if first_cell == '序号' or '序号' in first_cell:
+            # 检查后续单元格是否包含“交易日期”
+            if any('交易日期' in cell for cell in row_cells[1:]):
+                return i
+    # 备用：寻找第一个包含“序号”且第二列包含“交易日期”的行
+    for i in range(min(max_rows, len(df))):
+        row_cells = [str(cell).strip() for cell in df.iloc[i]]
+        if is_summary_row(row_cells):
+            continue
+        if any('序号' in cell for cell in row_cells) and any('交易日期' in cell for cell in row_cells):
             return i
     return None
 
