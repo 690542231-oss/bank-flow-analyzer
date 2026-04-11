@@ -91,7 +91,8 @@ def parse_date_cell(val):
 
 def is_summary_row(row_cells):
     """判断一行是否为汇总/统计行（应被跳过）"""
-    summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细', '记录条数']
+    summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细', '记录条数',
+                        '账户名称', '币种', '打印时间', '打印期限', '起始日期', '截至日期']
     row_text = ' '.join(row_cells).lower()
     for kw in summary_keywords:
         if kw in row_text:
@@ -105,7 +106,7 @@ def find_header_row(df, max_rows=80):
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
                 '收入金额', '支出金额',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
-                '交易类型', '业务类型', '流水号']
+                '交易类型', '业务类型', '流水号', '序号', '账户账号', '转出', '转入']
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
@@ -119,6 +120,9 @@ def find_header_row(df, max_rows=80):
         if any('交易日期' in cell for cell in row_cells) and any('支出金额' in cell for cell in row_cells):
             return i
         if any('交易日期' in cell for cell in row_cells) and any('收入金额' in cell for cell in row_cells):
+            return i
+        # 厦门国际银行专用：同时包含“序号”和“账户账号”和“转出”/“转入”
+        if any('序号' in cell for cell in row_cells) and any('账户账号' in cell for cell in row_cells):
             return i
     return None
 
@@ -142,6 +146,26 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_date': None,
         'trans_time': None
     }
+
+    # 特殊处理：厦门国际银行（智能厦门国际4285 等）
+    if '厦门国际' in sheet_name or '智能厦门国际' in sheet_name:
+        for col in df.columns:
+            col_str = str(col).strip()
+            if col_str == '交易日期':
+                mapping['date'] = col
+            elif col_str == '摘要':
+                mapping['remark'] = col
+            elif col_str == '转出':
+                mapping['amount_out'] = col
+            elif col_str == '转入':
+                mapping['amount_in'] = col
+            elif col_str == '对方户名':
+                mapping['counterparty'] = col
+            elif col_str == '币种':
+                mapping['currency'] = col
+        # 如果找到了必要列，直接返回
+        if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
+            return mapping
 
     # 特殊处理：华夏银行（精确匹配列名）
     if '华夏' in sheet_name:
@@ -181,9 +205,9 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['sign'] = col
         if not mapping['trans_type'] and any(kw in low for kw in ['交易类型', '业务类型']):
             mapping['trans_type'] = col
-        if not mapping['amount_in'] and any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）']):
+        if not mapping['amount_in'] and any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）', '转入']):
             mapping['amount_in'] = col
-        if not mapping['amount_out'] and any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）']):
+        if not mapping['amount_out'] and any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）', '转出']):
             mapping['amount_out'] = col
         if not mapping['amount'] and any(kw in low for kw in ['交易金额', '发生额', '金额']):
             mapping['amount'] = col
@@ -192,15 +216,15 @@ def identify_columns_enhanced(df, sheet_name):
         if not mapping['payee_name'] and any(kw in low for kw in ['收款人名称', '收款方名称']):
             mapping['payee_name'] = col
 
-    # 如果仍未匹配到收支列，尝试精确匹配列名“收入”“支出”
+    # 如果仍未匹配到收支列，尝试精确匹配列名“收入”“支出”“转入”“转出”
     if not mapping['amount_in']:
         for col in df.columns:
-            if str(col).strip() == '收入' or str(col).strip() == '收入金额':
+            if str(col).strip() in ('收入', '收入金额', '转入'):
                 mapping['amount_in'] = col
                 break
     if not mapping['amount_out']:
         for col in df.columns:
-            if str(col).strip() == '支出' or str(col).strip() == '支出金额':
+            if str(col).strip() in ('支出', '支出金额', '转出'):
                 mapping['amount_out'] = col
                 break
 
@@ -338,7 +362,7 @@ def parse_sheet(df, sheet_name, mapping):
 
             if not counterparty and cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
                 candidate = str(row[cp_col]).strip()
-                # 仅排除空值，不再排除“对公往来账户”等内部科目
+                # 仅排除空值，不再排除“对公往来账户”等内部科目（让用户自行决定是否过滤）
                 if candidate not in ('', 'nan', 'None'):
                     counterparty = candidate
 
@@ -387,6 +411,7 @@ def parse_sheet(df, sheet_name, mapping):
                 'original_sheet': sheet_name
             })
         except Exception as e:
+            # 跳过单行解析错误
             st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
             continue
     return records
