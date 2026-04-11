@@ -216,9 +216,9 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['trans_date'] = col
         if not mapping['trans_time'] and ('交易时间' in low or 'transactiontime' in low):
             mapping['trans_time'] = col
-        # 对手方列（支持“对方户名”、“对方单位名称”等）
+        # 对手方列
         if not mapping['counterparty']:
-            if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low or '对方户名' in low:
+            if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low:
                 mapping['counterparty'] = col
         if not mapping['counterparty'] and any(kw in low for kw in ['对手方户名', '对方单位']):
             mapping['counterparty'] = col
@@ -236,11 +236,10 @@ def identify_columns_enhanced(df, sheet_name):
         # 交易类型
         if not mapping['trans_type'] and any(kw in low for kw in ['交易类型', '业务类型']):
             mapping['trans_type'] = col
-        # 收入金额（贷方发生额）—— 增强：支持“贷方发生额/元(收入)”等变体
+        # 收入金额（贷方发生额）
         if not mapping['amount_in']:
             if any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）', '转入']):
                 mapping['amount_in'] = col
-            # 专门针对建设银行：列名包含“贷方发生额”和“收入”
             if '贷方发生额' in low and ('收入' in low or '贷方' in low):
                 mapping['amount_in'] = col
         # 支出金额（借方发生额）
@@ -477,6 +476,11 @@ def load_all_transactions(uploaded_files):
             continue
 
         for sheet_name in xls.sheet_names:
+            # ========== 新增排除“财司”工作表 ==========
+            if '财司' in sheet_name:
+                debug_info.append(f"⏭️ {file.name} - {sheet_name}: 跳过“财司”工作表（内部资金调拨）")
+                continue
+            # 原有排除逻辑
             if any(kw in sheet_name.lower() for kw in ['保证金', '汇总', '合计', 'balance']):
                 continue
             try:
@@ -542,7 +546,6 @@ def load_all_transactions(uploaded_files):
                     found_header = None
                     for i in range(min(30, len(df_raw))):
                         row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                        # 检查是否同时包含“交易时间”和“贷方发生额”
                         if any('交易时间' in cell for cell in row_cells) and any('贷方发生额' in cell for cell in row_cells):
                             found_header = i
                             break
@@ -550,9 +553,7 @@ def load_all_transactions(uploaded_files):
                         header_row = found_header
                         debug_info.append(f"✅ {file.name} - {sheet_name}: 建设银行专用表头行索引 = {header_row}")
                     else:
-                        # 回退到通用查找
                         header_row = find_header_row(df_raw)
-
                 # 华夏银行
                 elif '华夏' in sheet_name:
                     header_row = find_header_row_for_huaoxia(df_raw)
