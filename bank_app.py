@@ -103,7 +103,7 @@ def find_header_row(df, max_rows=80):
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
-                '收入金额', '支出金额',   # 华夏银行专用
+                '收入金额', '支出金额',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
                 '交易类型', '业务类型', '流水号']
     for i in range(min(max_rows, len(df))):
@@ -113,7 +113,7 @@ def find_header_row(df, max_rows=80):
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
-    # 备用方案：寻找同时包含“交易日期”和“支出金额”的行
+    # 备用方案：寻找同时包含“交易日期”和“支出金额”或“收入金额”的行
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
         if any('交易日期' in cell for cell in row_cells) and any('支出金额' in cell for cell in row_cells):
@@ -157,11 +157,6 @@ def identify_columns_enhanced(df, sheet_name):
                 mapping['amount_out'] = col
             elif col_str == '对方户名':
                 mapping['counterparty'] = col
-            elif col_str == '对方账号':
-                pass
-            elif col_str == '对方行名':
-                pass
-        # 如果找到了必要列，直接返回
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
@@ -258,7 +253,6 @@ def parse_sheet(df, sheet_name, mapping):
         try:
             # ---------- 日期解析 ----------
             trans_datetime = None
-            # 优先使用交易日期+时间列（中行专用，或华夏银行）
             if trans_date_col and trans_time_col:
                 date_val = row.get(trans_date_col) if trans_date_col in df.columns else None
                 time_val = row.get(trans_time_col) if trans_time_col in df.columns else None
@@ -344,7 +338,8 @@ def parse_sheet(df, sheet_name, mapping):
 
             if not counterparty and cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
                 candidate = str(row[cp_col]).strip()
-                if candidate not in ('', 'nan', 'None', '对公往来账户', '对公信贷-DPS系统间往来'):
+                # 仅排除空值，不再排除“对公往来账户”等内部科目
+                if candidate not in ('', 'nan', 'None'):
                     counterparty = candidate
 
             if not counterparty and direction == 'out' and payee_col and payee_col in df.columns:
@@ -392,7 +387,6 @@ def parse_sheet(df, sheet_name, mapping):
                 'original_sheet': sheet_name
             })
         except Exception as e:
-            # 跳过单行解析错误
             st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
             continue
     return records
@@ -427,12 +421,10 @@ def load_all_transactions(uploaded_files):
                 header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
-                    # 输出前20行原始数据前5列供调试
                     sample = df_raw.iloc[:20, :5].to_string()
                     debug_info.append(f"   前20行预览:\n{sample}")
                     continue
                 debug_info.append(f"✅ {file.name} - {sheet_name}: 表头行索引 = {header_row}")
-                # 输出表头行内容
                 header_content = df_raw.iloc[header_row, :10].to_string()
                 debug_info.append(f"   表头内容: {header_content}")
                 df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
