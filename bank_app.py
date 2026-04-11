@@ -96,7 +96,7 @@ def find_header_row(df, max_rows=30):
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
-                '交易类型', '业务类型']
+                '交易类型', '业务类型', '流水号', '对方户名']  # 新增“流水号”支持农商行
     for i in range(min(max_rows, len(df))):
         # 关键修复：将整行所有单元格显式转为字符串并小写
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
@@ -135,11 +135,11 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['trans_date'] = col
         if not mapping['trans_time'] and ('交易时间' in low or 'transactiontime' in low):
             mapping['trans_time'] = col
-        if not mapping['counterparty'] and any(kw in low for kw in ['对方户名', '对方单位名称', '收(付)方名称', '对方账户名称', '对手方户名', '对方单位']):
+        if not mapping['counterparty'] and any(kw in low for kw in ['对方户名', '对方单位名称', '收(付)方名称', '对方账户名称', '对手方户名', '对方单位', '对方户名']):
             mapping['counterparty'] = col
         if not mapping['currency'] and any(kw in low for kw in ['币种', '交易货币', '货币']):
             mapping['currency'] = col
-        if not mapping['remark'] and any(kw in low for kw in ['摘要', '备注', '交易描述']):
+        if not mapping['remark'] and any(kw in low for kw in ['摘要', '备注', '交易描述', '附言']):
             mapping['remark'] = col
         if not mapping['purpose'] and any(kw in low for kw in ['用途', '附言']):
             mapping['purpose'] = col
@@ -147,6 +147,7 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['sign'] = col
         if not mapping['trans_type'] and any(kw in low for kw in ['交易类型', '业务类型']):
             mapping['trans_type'] = col
+        # 收入/支出列（农商行常用）
         if not mapping['amount_in'] and any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）']):
             mapping['amount_in'] = col
         if not mapping['amount_out'] and any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）']):
@@ -157,6 +158,18 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['payer_name'] = col
         if not mapping['payee_name'] and any(kw in low for kw in ['收款人名称', '收款方名称']):
             mapping['payee_name'] = col
+
+    # 针对珠海农商行等地方银行，如果上面没有匹配到金额列，尝试直接识别“收入”、“支出”列
+    if not mapping['amount_in']:
+        for col in df.columns:
+            if '收入' in str(col) and '支出' not in str(col):
+                mapping['amount_in'] = col
+                break
+    if not mapping['amount_out']:
+        for col in df.columns:
+            if '支出' in str(col) and '收入' not in str(col):
+                mapping['amount_out'] = col
+                break
 
     if '中行' in sheet_name:
         if not mapping['payer_name']:
@@ -191,6 +204,17 @@ def parse_sheet(df, sheet_name, mapping):
 
     if not date_col:
         return records
+
+    # 从 sheet 名称中尝试推断币种（如“欧元”）
+    inferred_currency = None
+    if '欧元' in sheet_name:
+        inferred_currency = 'EUR'
+    elif '美元' in sheet_name:
+        inferred_currency = 'USD'
+    elif '港币' in sheet_name:
+        inferred_currency = 'HKD'
+    elif '英镑' in sheet_name:
+        inferred_currency = 'GBP'
 
     for idx, row in df.iterrows():
         try:
@@ -246,6 +270,7 @@ def parse_sheet(df, sheet_name, mapping):
 
             in_col = mapping.get('amount_in')
             out_col = mapping.get('amount_out')
+            # 优先使用明确的收入/支出列
             if in_col and in_col in df.columns:
                 amt = safe_float_convert(row[in_col])
                 if amt > 0:
@@ -257,6 +282,7 @@ def parse_sheet(df, sheet_name, mapping):
                     amount = amt
                     direction = 'out'
 
+            # 如果没有单独的收支列，尝试从金额列的正负判断
             if amount == 0:
                 amount_col = mapping.get('amount')
                 if amount_col and amount_col in df.columns:
@@ -268,11 +294,12 @@ def parse_sheet(df, sheet_name, mapping):
                         amount = -amt
                         direction = 'out'
 
+            # 通过交易类型辅助判断方向
             if amount > 0 and direction is None and trans_type_col and trans_type_col in df.columns:
                 trans_type = str(row[trans_type_col]).strip()
-                if trans_type in ('往账', '支出', '付款', 'debit'):
+                if trans_type in ('往账', '支出', '付款', 'debit', '借方'):
                     direction = 'out'
-                elif trans_type in ('来账', '收入', '收款', 'credit'):
+                elif trans_type in ('来账', '收入', '收款', 'credit', '贷方'):
                     direction = 'in'
 
             if amount == 0 or direction is None:
@@ -312,6 +339,8 @@ def parse_sheet(df, sheet_name, mapping):
                     currency = 'HKD'
                 else:
                     currency = curr.upper()
+            elif inferred_currency:
+                currency = inferred_currency
 
             remark = ''
             if remark_col and remark_col in df.columns and pd.notna(row[remark_col]):
@@ -383,7 +412,7 @@ def load_all_transactions(uploaded_files):
                     debug_info.append(f"📄 {file.name}/{sheet_name} 示例: {sample['direction']} {sample['counterparty'][:30]} {sample['amount']} {sample['currency']} 日期:{sample['date']}")
                 else:
                     st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
-                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, payer={mapping['payer_name']}, payee={mapping['payee_name']}, amount={mapping['amount']}")
+                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, payer={mapping['payer_name']}, payee={mapping['payee_name']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}")
             except Exception as e:
                 st.error(f"解析失败 {file.name} - {sheet_name}: {str(e)}")
     with st.sidebar.expander("🔧 调试信息", expanded=False):
