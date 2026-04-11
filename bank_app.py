@@ -105,7 +105,7 @@ def find_header_row(df, max_rows=100):
                 '收入金额', '支出金额',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
                 '交易类型', '业务类型', '流水号', '序号', '账户账号', '转出', '转入',
-                '交易金额', '对方账户名称', '交易流水号']  # 新增交易流水号
+                '交易金额', '对方账户名称', '交易流水号']
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
@@ -119,7 +119,6 @@ def find_header_row(df, max_rows=100):
     return None
 
 def find_header_row_for_huaoxia(df, max_rows=100):
-    """专门为华夏银行查找表头行"""
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).strip() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
@@ -158,7 +157,6 @@ def identify_columns_enhanced(df, sheet_name):
 
     # 特殊处理：意大利子公司（中行罗马分行）
     if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name:
-        # 寻找包含“交易金额”和“对方账户名称”的列
         for col in df.columns:
             col_str = str(col).strip()
             if col_str == '交易金额':
@@ -169,7 +167,6 @@ def identify_columns_enhanced(df, sheet_name):
                 mapping['date'] = col
             elif col_str == '交易币种':
                 mapping['currency'] = col
-        # 如果找到了必要列，直接返回
         if mapping['date'] and mapping['amount'] and mapping['counterparty']:
             return mapping
 
@@ -466,27 +463,38 @@ def load_all_transactions(uploaded_files):
                 df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
                 if df_raw.empty:
                     continue
-                # 针对意大利子公司，手动指定表头行（因为通用方法可能失败）
                 header_row = None
                 sheet_currency = None
+                # 意大利子公司特殊处理：动态查找表头和币种
                 if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name:
-                    # 尝试从第3行（索引3）作为表头
-                    if len(df_raw) > 3:
-                        # 检查第3行是否包含“交易流水号”和“交易金额”
-                        row3 = [str(cell).strip() for cell in df_raw.iloc[3, :5]]
-                        if '交易流水号' in row3 and '交易金额' in row3:
-                            header_row = 3
-                    # 获取币种：第2行第1列
-                    if len(df_raw) > 2:
-                        currency_cell = str(df_raw.iloc[2, 0]).strip()
-                        if currency_cell == '欧元':
-                            sheet_currency = 'EUR'
-                        elif currency_cell == '美元':
-                            sheet_currency = 'USD'
-                        elif currency_cell == '港币':
-                            sheet_currency = 'HKD'
+                    # 查找表头行（包含“交易金额”和“对方账户名称”）
+                    for i in range(min(50, len(df_raw))):
+                        row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                        if '交易金额' in row_cells and '对方账户名称' in row_cells:
+                            header_row = i
+                            break
+                    if header_row is None:
+                        # 后备：查找包含“交易流水号”和“交易金额”的行
+                        for i in range(min(50, len(df_raw))):
+                            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                            if '交易流水号' in row_cells and '交易金额' in row_cells:
+                                header_row = i
+                                break
+                    # 查找币种（包含“货币”的行）
+                    for i in range(min(20, len(df_raw))):
+                        row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                        if '货币' in row_cells:
+                            idx = row_cells.index('货币') if '货币' in row_cells else -1
+                            if idx + 1 < len(row_cells):
+                                curr_val = row_cells[idx+1]
+                                if curr_val == '欧元':
+                                    sheet_currency = 'EUR'
+                                elif curr_val == '美元':
+                                    sheet_currency = 'USD'
+                                elif curr_val == '港币':
+                                    sheet_currency = 'HKD'
+                                break
                 else:
-                    # 针对华夏银行使用专用表头查找
                     if '华夏' in sheet_name:
                         header_row = find_header_row_for_huaoxia(df_raw)
                     else:
