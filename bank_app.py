@@ -206,49 +206,69 @@ def identify_columns_enhanced(df, sheet_name):
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
-    # 通用匹配
+    # 通用匹配（增强建设银行列名支持）
     for col in df.columns:
         low = normalize_column_name(str(col))
+        # 日期列
         if not mapping['date'] and any(kw in low for kw in ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日']):
             mapping['date'] = col
         if not mapping['trans_date'] and ('交易日期' in low or 'transactiondate' in low):
             mapping['trans_date'] = col
         if not mapping['trans_time'] and ('交易时间' in low or 'transactiontime' in low):
             mapping['trans_time'] = col
+        # 对手方列（支持“对方户名”、“对方单位名称”等）
         if not mapping['counterparty']:
-            if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low:
+            if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low or '对方户名' in low:
                 mapping['counterparty'] = col
         if not mapping['counterparty'] and any(kw in low for kw in ['对手方户名', '对方单位']):
             mapping['counterparty'] = col
+        # 币种列
         if not mapping['currency'] and any(kw in low for kw in ['币种', '交易货币', '货币']):
             mapping['currency'] = col
+        # 摘要/备注
         if not mapping['remark'] and any(kw in low for kw in ['摘要', '备注', '交易描述']):
             mapping['remark'] = col
         if not mapping['purpose'] and any(kw in low for kw in ['用途', '附言']):
             mapping['purpose'] = col
+        # 借贷标志
         if not mapping['sign'] and any(kw in low for kw in ['借贷标志', '收支标志', '借/贷', 'direction']):
             mapping['sign'] = col
+        # 交易类型
         if not mapping['trans_type'] and any(kw in low for kw in ['交易类型', '业务类型']):
             mapping['trans_type'] = col
-        if not mapping['amount_in'] and any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）', '转入']):
-            mapping['amount_in'] = col
-        if not mapping['amount_out'] and any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）', '转出']):
-            mapping['amount_out'] = col
+        # 收入金额（贷方发生额）—— 增强：支持“贷方发生额/元(收入)”等变体
+        if not mapping['amount_in']:
+            if any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）', '转入']):
+                mapping['amount_in'] = col
+            # 专门针对建设银行：列名包含“贷方发生额”和“收入”
+            if '贷方发生额' in low and ('收入' in low or '贷方' in low):
+                mapping['amount_in'] = col
+        # 支出金额（借方发生额）
+        if not mapping['amount_out']:
+            if any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）', '转出']):
+                mapping['amount_out'] = col
+            if '借方发生额' in low and ('支出' in low or '支取' in low):
+                mapping['amount_out'] = col
+        # 交易金额列
         if not mapping['amount'] and any(kw in low for kw in ['交易金额', '发生额', '金额']):
             mapping['amount'] = col
+        # 付款人/收款人
         if not mapping['payer_name'] and any(kw in low for kw in ['付款人名称', '付款方名称']):
             mapping['payer_name'] = col
         if not mapping['payee_name'] and any(kw in low for kw in ['收款人名称', '收款方名称']):
             mapping['payee_name'] = col
 
+    # 若仍未找到收入/支出列，尝试精确匹配常见列名
     if not mapping['amount_in']:
         for col in df.columns:
-            if str(col).strip() in ('收入', '收入金额', '转入'):
+            col_str = str(col).strip()
+            if col_str in ('收入', '收入金额', '转入', '贷方发生额', '贷方发生额/元(收入)'):
                 mapping['amount_in'] = col
                 break
     if not mapping['amount_out']:
         for col in df.columns:
-            if str(col).strip() in ('支出', '支出金额', '转出'):
+            col_str = str(col).strip()
+            if col_str in ('支出', '支出金额', '转出', '借方发生额', '借方发生额/元(支取)'):
                 mapping['amount_out'] = col
                 break
 
@@ -465,13 +485,13 @@ def load_all_transactions(uploaded_files):
                     continue
                 header_row = None
                 sheet_currency = None
-                # 意大利子公司特殊处理：使用固定行位置解析，不依赖表头查找
+
+                # 意大利子公司特殊处理
                 if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name or '意大利' in sheet_name:
                     debug_info.append(f"🔍 {file.name} - {sheet_name}: 使用意大利子公司专用解析器")
-                    # ========== 修复开始 ==========
-                    # 正确获取币种：工作表第3行（索引2）第2列（索引1）
+                    # 正确获取币种（第3行第2列，索引2,1）
                     if len(df_raw) > 2:
-                        currency_cell = str(df_raw.iloc[2, 1]).strip()   # 修正：第3行第2列
+                        currency_cell = str(df_raw.iloc[2, 1]).strip()  # 修正：第3行第2列
                         if currency_cell == '欧元':
                             sheet_currency = 'EUR'
                         elif currency_cell == '美元':
@@ -484,27 +504,23 @@ def load_all_transactions(uploaded_files):
                     else:
                         header_row = None
                     if header_row is not None:
-                        # 读取数据
                         df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
                         if not df_data.empty:
-                            # 直接根据列名映射，并增加币种列映射
                             mapping = {
                                 'date': '交易日期' if '交易日期' in df_data.columns else None,
                                 'amount': '交易金额' if '交易金额' in df_data.columns else None,
                                 'counterparty': '对方账户名称' if '对方账户名称' in df_data.columns else None,
-                                'currency': '交易币种' if '交易币种' in df_data.columns else None,   # 新增币种列
+                                'currency': '交易币种' if '交易币种' in df_data.columns else None,
                             }
-                            # 如果列名不完全匹配，尝试使用位置（固定列索引）
+                            # 位置备用
                             if mapping['date'] is None and len(df_data.columns) > 5:
-                                mapping['date'] = df_data.columns[5]   # 交易日期通常在列索引5
+                                mapping['date'] = df_data.columns[5]
                             if mapping['amount'] is None and len(df_data.columns) > 3:
-                                mapping['amount'] = df_data.columns[3]  # 交易金额通常在列索引3
+                                mapping['amount'] = df_data.columns[3]
                             if mapping['counterparty'] is None and len(df_data.columns) > 8:
-                                mapping['counterparty'] = df_data.columns[8]  # 对方账户名称通常在列索引8
+                                mapping['counterparty'] = df_data.columns[8]
                             if mapping['currency'] is None and len(df_data.columns) > 2:
-                                # 交易币种通常在列索引2（第3列）
                                 mapping['currency'] = df_data.columns[2]
-                            # 解析
                             records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
                             filtered = [r for r in records if r['counterparty'] not in internal_companies]
                             all_trans.extend(filtered)
@@ -518,24 +534,44 @@ def load_all_transactions(uploaded_files):
                                 if len(df_data) > 0:
                                     sample_rows = df_data.head(3).iloc[:, :5].to_string()
                                     debug_info.append(f"   前3行数据示例:\n{sample_rows}")
-                            continue  # 跳过通用解析
-                # ========== 修复结束 ==========
-                # 非意大利子公司，使用通用方法
-                if '华夏' in sheet_name:
+                            continue
+
+                # 建设银行工作表特殊处理：尝试直接查找包含“交易时间”和“贷方发生额”的行作为表头
+                if '建行' in sheet_name or '建设银行' in sheet_name:
+                    # 手动查找表头行
+                    found_header = None
+                    for i in range(min(30, len(df_raw))):
+                        row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                        # 检查是否同时包含“交易时间”和“贷方发生额”
+                        if any('交易时间' in cell for cell in row_cells) and any('贷方发生额' in cell for cell in row_cells):
+                            found_header = i
+                            break
+                    if found_header is not None:
+                        header_row = found_header
+                        debug_info.append(f"✅ {file.name} - {sheet_name}: 建设银行专用表头行索引 = {header_row}")
+                    else:
+                        # 回退到通用查找
+                        header_row = find_header_row(df_raw)
+
+                # 华夏银行
+                elif '华夏' in sheet_name:
                     header_row = find_header_row_for_huaoxia(df_raw)
                 else:
                     header_row = find_header_row(df_raw)
+
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
                     sample = df_raw.iloc[:20, :5].to_string()
                     debug_info.append(f"   前20行预览:\n{sample}")
                     continue
+
                 debug_info.append(f"✅ {file.name} - {sheet_name}: 表头行索引 = {header_row}")
                 header_content = df_raw.iloc[header_row, :10].to_string()
                 debug_info.append(f"   表头内容: {header_content}")
                 df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
                 if df_data.empty:
                     continue
+
                 mapping = identify_columns_enhanced(df_data, sheet_name)
                 records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
                 filtered = [r for r in records if r['counterparty'] not in internal_companies]
