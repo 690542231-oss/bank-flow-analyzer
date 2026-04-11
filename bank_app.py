@@ -92,14 +92,15 @@ def parse_date_cell(val):
 def is_summary_row(row_cells):
     """判断一行是否为汇总/统计行（应被跳过）"""
     summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细', '记录条数',
-                        '账户名称', '币种', '打印时间', '打印期限', '起始日期', '截至日期']
+                        '账户名称', '币种', '打印时间', '打印期限', '起始日期', '截至日期',
+                        '收入总金额', '支出总金额', '收入总笔数', '支出总笔数']  # 增加华夏银行汇总关键词
     row_text = ' '.join(row_cells).lower()
     for kw in summary_keywords:
         if kw in row_text:
             return True
     return False
 
-def find_header_row(df, max_rows=80):
+def find_header_row(df, max_rows=100):
     """查找表头行：跳过汇总行，找到包含多个关键词的行"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
@@ -114,10 +115,10 @@ def find_header_row(df, max_rows=80):
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
-    # 备用方案：寻找同时包含“序号”和“账户账号”的行（厦门国际银行等）
+    # 备用方案：寻找同时包含“序号”和“交易日期”的行（适用于华夏银行等）
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
-        if any('序号' in cell for cell in row_cells) and any('账户账号' in cell for cell in row_cells):
+        if any('序号' in cell for cell in row_cells) and any('交易日期' in cell for cell in row_cells):
             return i
     return None
 
@@ -142,6 +143,24 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_time': None
     }
 
+    # 特殊处理：华夏银行（精确匹配列名）
+    if '华夏' in sheet_name:
+        for col in df.columns:
+            col_str = str(col).strip()
+            if col_str == '交易日期':
+                mapping['date'] = col
+            elif col_str == '交易时间':
+                mapping['trans_time'] = col
+            elif col_str == '收入金额':
+                mapping['amount_in'] = col
+            elif col_str == '支出金额':
+                mapping['amount_out'] = col
+            elif col_str == '对方户名':
+                mapping['counterparty'] = col
+        # 如果找到了必要列，直接返回
+        if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
+            return mapping
+
     # 特殊处理：厦门国际银行（智能厦门国际4285 等）
     if '厦门国际' in sheet_name or '智能厦门国际' in sheet_name:
         for col in df.columns:
@@ -158,28 +177,10 @@ def identify_columns_enhanced(df, sheet_name):
                 mapping['counterparty'] = col
             elif col_str == '币种':
                 mapping['currency'] = col
-        # 如果找到了必要列，直接返回
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
-    # 特殊处理：华夏银行（精确匹配列名）
-    if '华夏' in sheet_name:
-        for col in df.columns:
-            col_str = str(col).strip()
-            if col_str == '交易日期':
-                mapping['date'] = col
-            elif col_str == '交易时间':
-                mapping['trans_time'] = col
-            elif col_str == '收入金额':
-                mapping['amount_in'] = col
-            elif col_str == '支出金额':
-                mapping['amount_out'] = col
-            elif col_str == '对方户名':
-                mapping['counterparty'] = col
-        if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
-            return mapping
-
-    # 通用匹配逻辑（注意优先级：对方户名优先于对方行名）
+    # 通用匹配逻辑
     for col in df.columns:
         low = normalize_column_name(str(col))
         if not mapping['date'] and any(kw in low for kw in ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日']):
@@ -188,7 +189,6 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['trans_date'] = col
         if not mapping['trans_time'] and ('交易时间' in low or 'transactiontime' in low):
             mapping['trans_time'] = col
-        # 优先匹配“对方户名”，如果已匹配到则不再匹配其他“对方”列
         if not mapping['counterparty']:
             if '对方户名' in low or '对方单位名称' in low or '收(付)方名称' in low or '对方账户名称' in low:
                 mapping['counterparty'] = col
@@ -276,6 +276,7 @@ def parse_sheet(df, sheet_name, mapping):
         try:
             # ---------- 日期解析 ----------
             trans_datetime = None
+            # 优先使用交易日期+时间列（中行专用，或华夏银行）
             if trans_date_col and trans_time_col:
                 date_val = row.get(trans_date_col) if trans_date_col in df.columns else None
                 time_val = row.get(trans_time_col) if trans_time_col in df.columns else None
@@ -365,7 +366,7 @@ def parse_sheet(df, sheet_name, mapping):
             # 如果方向为付款，尝试从收款人名称获取
             if not counterparty and direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
                 counterparty = str(row[payee_col]).strip()
-            # 兜底：尝试从“对方账户名称”列获取（厦门国际银行可能使用此列）
+            # 兜底：尝试从“对方账户名称”列获取
             if not counterparty:
                 for col in df.columns:
                     if '对方账户名称' in str(col) or '对方户名' in str(col):
