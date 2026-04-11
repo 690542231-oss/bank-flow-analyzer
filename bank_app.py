@@ -468,16 +468,17 @@ def load_all_transactions(uploaded_files):
                 # 意大利子公司特殊处理：使用固定行位置解析，不依赖表头查找
                 if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name or '意大利' in sheet_name:
                     debug_info.append(f"🔍 {file.name} - {sheet_name}: 使用意大利子公司专用解析器")
-                    # 获取币种（第2行第1列，索引2,0）
+                    # ========== 修复开始 ==========
+                    # 正确获取币种：工作表第3行（索引2）第2列（索引1）
                     if len(df_raw) > 2:
-                        currency_cell = str(df_raw.iloc[2, 0]).strip()
+                        currency_cell = str(df_raw.iloc[2, 1]).strip()   # 修正：第3行第2列
                         if currency_cell == '欧元':
                             sheet_currency = 'EUR'
                         elif currency_cell == '美元':
                             sheet_currency = 'USD'
                         elif currency_cell == '港币':
                             sheet_currency = 'HKD'
-                    # 表头在第3行（索引3）
+                    # 表头在第4行（索引3）
                     if len(df_raw) > 3:
                         header_row = 3
                     else:
@@ -486,22 +487,23 @@ def load_all_transactions(uploaded_files):
                         # 读取数据
                         df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
                         if not df_data.empty:
-                            # 直接根据列名映射
+                            # 直接根据列名映射，并增加币种列映射
                             mapping = {
                                 'date': '交易日期' if '交易日期' in df_data.columns else None,
                                 'amount': '交易金额' if '交易金额' in df_data.columns else None,
                                 'counterparty': '对方账户名称' if '对方账户名称' in df_data.columns else None,
+                                'currency': '交易币种' if '交易币种' in df_data.columns else None,   # 新增币种列
                             }
                             # 如果列名不完全匹配，尝试使用位置（固定列索引）
                             if mapping['date'] is None and len(df_data.columns) > 5:
-                                # 交易日期通常在列索引5（第6列）
-                                mapping['date'] = df_data.columns[5]
+                                mapping['date'] = df_data.columns[5]   # 交易日期通常在列索引5
                             if mapping['amount'] is None and len(df_data.columns) > 3:
-                                # 交易金额通常在列索引3（第4列）
-                                mapping['amount'] = df_data.columns[3]
+                                mapping['amount'] = df_data.columns[3]  # 交易金额通常在列索引3
                             if mapping['counterparty'] is None and len(df_data.columns) > 8:
-                                # 对方账户名称通常在列索引8（第9列）
-                                mapping['counterparty'] = df_data.columns[8]
+                                mapping['counterparty'] = df_data.columns[8]  # 对方账户名称通常在列索引8
+                            if mapping['currency'] is None and len(df_data.columns) > 2:
+                                # 交易币种通常在列索引2（第3列）
+                                mapping['currency'] = df_data.columns[2]
                             # 解析
                             records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
                             filtered = [r for r in records if r['counterparty'] not in internal_companies]
@@ -512,11 +514,12 @@ def load_all_transactions(uploaded_files):
                                 debug_info.append(f"📄 {file.name}/{sheet_name} 示例: {sample['direction']} {sample['counterparty'][:30]} {sample['amount']} {sample['currency']} 日期:{sample['date']}")
                             else:
                                 st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
-                                debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, amount={mapping['amount']}, counterparty={mapping['counterparty']}, currency={sheet_currency}")
+                                debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, amount={mapping['amount']}, counterparty={mapping['counterparty']}, currency={mapping['currency']}, sheet_currency={sheet_currency}")
                                 if len(df_data) > 0:
                                     sample_rows = df_data.head(3).iloc[:, :5].to_string()
                                     debug_info.append(f"   前3行数据示例:\n{sample_rows}")
                             continue  # 跳过通用解析
+                # ========== 修复结束 ==========
                 # 非意大利子公司，使用通用方法
                 if '华夏' in sheet_name:
                     header_row = find_header_row_for_huaoxia(df_raw)
