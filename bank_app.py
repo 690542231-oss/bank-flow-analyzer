@@ -62,7 +62,7 @@ def safe_float_convert(val):
         return 0.0
 
 def parse_date_cell(val):
-    """将各种格式的日期值转换为 datetime.date 对象（非中行时使用）"""
+    """将各种格式的日期值转换为 datetime.date 对象"""
     if pd.isna(val):
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
@@ -76,11 +76,12 @@ def parse_date_cell(val):
             except:
                 return None
     if isinstance(val, str):
-        # 尝试先直接转换为datetime（支持"2025-11-13 10:40:39"格式）
+        # 优先使用 pandas 解析（支持 "2025-11-12 16:30:18" 格式）
         try:
             return pd.to_datetime(val).date()
         except:
             pass
+        # 否则尝试常见格式
         date_part = val.split()[0] if ' ' in val else val
         for fmt in ('%Y%m%d', '%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%m/%d/%Y'):
             try:
@@ -90,7 +91,7 @@ def parse_date_cell(val):
         return None
     return None
 
-def find_header_row(df, max_rows=30):
+def find_header_row(df, max_rows=50):
     """查找表头行：将每一行的所有单元格转为字符串后再匹配关键词"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
@@ -124,6 +125,26 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_date': None,
         'trans_time': None
     }
+
+    # 如果是农商行工作表，使用固定列名映射（提高成功率）
+    if '农商' in sheet_name:
+        for col in df.columns:
+            col_str = str(col).strip()
+            if col_str in ['交易日期', '记账日期']:
+                mapping['date'] = col
+            elif col_str == '收入':
+                mapping['amount_in'] = col
+            elif col_str == '支出':
+                mapping['amount_out'] = col
+            elif col_str == '对方户名':
+                mapping['counterparty'] = col
+            elif col_str == '币种':
+                mapping['currency'] = col
+        # 如果找到了必要的列，直接返回
+        if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
+            return mapping
+
+    # 通用匹配逻辑
     for col in df.columns:
         low = normalize_column_name(str(col))
         if not mapping['date'] and any(kw in low for kw in ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日']):
@@ -144,7 +165,6 @@ def identify_columns_enhanced(df, sheet_name):
             mapping['sign'] = col
         if not mapping['trans_type'] and any(kw in low for kw in ['交易类型', '业务类型']):
             mapping['trans_type'] = col
-        # 收入/支出列（农商行常用）
         if not mapping['amount_in'] and any(kw in low for kw in ['贷方发生额', '贷方金额', '收入', '贷方', '收入金额', '贷方发生额（收入）']):
             mapping['amount_in'] = col
         if not mapping['amount_out'] and any(kw in low for kw in ['借方发生额', '借方金额', '支出', '借方', '支出金额', '借方发生额（支取）']):
@@ -156,15 +176,15 @@ def identify_columns_enhanced(df, sheet_name):
         if not mapping['payee_name'] and any(kw in low for kw in ['收款人名称', '收款方名称']):
             mapping['payee_name'] = col
 
-    # 针对珠海农商行：如果还没有匹配到收支列，直接按列名“收入”“支出”匹配
+    # 如果仍未匹配到收支列，尝试精确匹配列名“收入”“支出”
     if not mapping['amount_in']:
         for col in df.columns:
-            if '收入' == str(col).strip():
+            if str(col).strip() == '收入':
                 mapping['amount_in'] = col
                 break
     if not mapping['amount_out']:
         for col in df.columns:
-            if '支出' == str(col).strip():
+            if str(col).strip() == '支出':
                 mapping['amount_out'] = col
                 break
 
@@ -217,6 +237,7 @@ def parse_sheet(df, sheet_name, mapping):
         try:
             # ---------- 日期解析 ----------
             trans_datetime = None
+            # 优先使用交易日期+时间列（中行专用）
             if '中行' in sheet_name and trans_date_col and trans_time_col:
                 date_val = row.get(trans_date_col)
                 time_val = row.get(trans_time_col)
@@ -252,6 +273,12 @@ def parse_sheet(df, sheet_name, mapping):
                 date_val = row.get(date_col)
                 parsed_date = parse_date_cell(date_val)
                 if parsed_date is None:
+                    # 如果日期列解析失败，尝试使用“记账日期”列（如果存在且不同）
+                    if '记账日期' in df.columns and date_col != '记账日期':
+                        alt_date = parse_date_cell(row.get('记账日期'))
+                        if alt_date:
+                            parsed_date = alt_date
+                if parsed_date is None:
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
 
@@ -272,6 +299,7 @@ def parse_sheet(df, sheet_name, mapping):
                     amount = amt
                     direction = 'out'
 
+            # 如果仍然没有金额，尝试从单个金额列获取
             if amount == 0:
                 amount_col = mapping.get('amount')
                 if amount_col and amount_col in df.columns:
@@ -283,6 +311,7 @@ def parse_sheet(df, sheet_name, mapping):
                         amount = -amt
                         direction = 'out'
 
+            # 辅助判断：通过交易类型
             if amount > 0 and direction is None and trans_type_col and trans_type_col in df.columns:
                 trans_type = str(row[trans_type_col]).strip()
                 if trans_type in ('往账', '支出', '付款', 'debit', '借方'):
@@ -350,7 +379,7 @@ def parse_sheet(df, sheet_name, mapping):
                 'original_sheet': sheet_name
             })
         except Exception as e:
-            # 跳过单行解析错误，避免整个工作表崩溃
+            # 跳过单行解析错误
             st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
             continue
     return records
@@ -385,6 +414,9 @@ def load_all_transactions(uploaded_files):
                 header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
+                    # 尝试输出前10行原始数据的前5列供调试
+                    sample = df_raw.iloc[:10, :5].to_string()
+                    debug_info.append(f"   前10行预览:\n{sample}")
                     continue
                 df_data = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
                 if df_data.empty:
@@ -400,10 +432,14 @@ def load_all_transactions(uploaded_files):
                 else:
                     st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部交易")
                     debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, currency={mapping['currency']}")
+                    # 输出前3行数据（前5列）帮助调试
+                    if len(df_data) > 0:
+                        sample_rows = df_data.head(3).iloc[:, :5].to_string()
+                        debug_info.append(f"   前3行数据示例:\n{sample_rows}")
             except Exception as e:
                 st.error(f"解析失败 {file.name} - {sheet_name}: {str(e)}")
     with st.sidebar.expander("🔧 调试信息", expanded=False):
-        for info in debug_info[:30]:
+        for info in debug_info[:50]:
             st.text(info)
     return all_trans
 
