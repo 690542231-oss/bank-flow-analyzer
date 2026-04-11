@@ -76,10 +76,12 @@ def parse_date_cell(val):
             except:
                 return None
     if isinstance(val, str):
+        # 优先使用 pandas 解析（支持 "2025-12-08" 或 "2025-12-08 10:37:38"）
         try:
             return pd.to_datetime(val).date()
         except:
             pass
+        # 否则尝试常见格式
         date_part = val.split()[0] if ' ' in val else val
         for fmt in ('%Y%m%d', '%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%m/%d/%Y'):
             try:
@@ -91,23 +93,23 @@ def parse_date_cell(val):
 
 def is_summary_row(row_cells):
     """判断一行是否为汇总/统计行（应被跳过）"""
-    summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细']
+    summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细', '记录条数']
     row_text = ' '.join(row_cells).lower()
     for kw in summary_keywords:
         if kw in row_text:
             return True
     return False
 
-def find_header_row(df, max_rows=50):
+def find_header_row(df, max_rows=80):
     """查找表头行：跳过汇总行，找到包含多个关键词的行"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
+                '收入金额', '支出金额',   # 华夏银行专用
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
                 '交易类型', '业务类型', '流水号']
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
-        # 跳过明显的汇总行
         if is_summary_row(row_cells):
             continue
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
@@ -136,21 +138,23 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_time': None
     }
 
-    # 如果是农商行工作表，使用固定列名映射（提高成功率）
-    if '农商' in sheet_name:
+    # 特殊处理：华夏银行（精确匹配列名）
+    if '华夏' in sheet_name:
         for col in df.columns:
             col_str = str(col).strip()
-            if col_str in ['交易日期', '记账日期']:
+            if col_str == '交易日期':
                 mapping['date'] = col
-            elif col_str == '收入':
+            elif col_str == '交易时间':
+                mapping['trans_time'] = col
+            elif col_str == '收入金额':
                 mapping['amount_in'] = col
-            elif col_str == '支出':
+            elif col_str == '支出金额':
                 mapping['amount_out'] = col
             elif col_str == '对方户名':
                 mapping['counterparty'] = col
-            elif col_str == '币种':
-                mapping['currency'] = col
-        # 如果找到了必要的列，直接返回
+            elif col_str == '对方账号':
+                pass  # 暂不使用
+        # 如果找到了必要列，直接返回
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
@@ -189,12 +193,12 @@ def identify_columns_enhanced(df, sheet_name):
     # 如果仍未匹配到收支列，尝试精确匹配列名“收入”“支出”
     if not mapping['amount_in']:
         for col in df.columns:
-            if str(col).strip() == '收入':
+            if str(col).strip() == '收入' or str(col).strip() == '收入金额':
                 mapping['amount_in'] = col
                 break
     if not mapping['amount_out']:
         for col in df.columns:
-            if str(col).strip() == '支出':
+            if str(col).strip() == '支出' or str(col).strip() == '支出金额':
                 mapping['amount_out'] = col
                 break
 
@@ -247,9 +251,10 @@ def parse_sheet(df, sheet_name, mapping):
         try:
             # ---------- 日期解析 ----------
             trans_datetime = None
-            if '中行' in sheet_name and trans_date_col and trans_time_col:
-                date_val = row.get(trans_date_col)
-                time_val = row.get(trans_time_col)
+            # 优先使用交易日期+时间列（中行专用，或华夏银行）
+            if trans_date_col and trans_time_col:
+                date_val = row.get(trans_date_col) if trans_date_col in df.columns else None
+                time_val = row.get(trans_time_col) if trans_time_col in df.columns else None
                 if pd.notna(date_val) and pd.notna(time_val):
                     try:
                         if isinstance(date_val, (int, float)):
@@ -415,9 +420,9 @@ def load_all_transactions(uploaded_files):
                 header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
-                    # 输出前15行原始数据前5列供调试
-                    sample = df_raw.iloc[:15, :5].to_string()
-                    debug_info.append(f"   前15行预览:\n{sample}")
+                    # 输出前20行原始数据前5列供调试
+                    sample = df_raw.iloc[:20, :5].to_string()
+                    debug_info.append(f"   前20行预览:\n{sample}")
                     continue
                 debug_info.append(f"✅ {file.name} - {sheet_name}: 表头行索引 = {header_row}")
                 # 输出表头行内容
