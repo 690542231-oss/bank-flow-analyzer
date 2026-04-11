@@ -76,12 +76,10 @@ def parse_date_cell(val):
             except:
                 return None
     if isinstance(val, str):
-        # 优先使用 pandas 解析（支持 "2025-12-08" 或 "2025-12-08 10:37:38"）
         try:
             return pd.to_datetime(val).date()
         except:
             pass
-        # 否则尝试常见格式
         date_part = val.split()[0] if ' ' in val else val
         for fmt in ('%Y%m%d', '%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%m/%d/%Y'):
             try:
@@ -114,6 +112,13 @@ def find_header_row(df, max_rows=80):
             continue
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
+            return i
+    # 备用方案：寻找同时包含“交易日期”和“支出金额”的行
+    for i in range(min(max_rows, len(df))):
+        row_cells = [str(cell).lower() for cell in df.iloc[i]]
+        if any('交易日期' in cell for cell in row_cells) and any('支出金额' in cell for cell in row_cells):
+            return i
+        if any('交易日期' in cell for cell in row_cells) and any('收入金额' in cell for cell in row_cells):
             return i
     return None
 
@@ -153,7 +158,9 @@ def identify_columns_enhanced(df, sheet_name):
             elif col_str == '对方户名':
                 mapping['counterparty'] = col
             elif col_str == '对方账号':
-                pass  # 暂不使用
+                pass
+            elif col_str == '对方行名':
+                pass
         # 如果找到了必要列，直接返回
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
