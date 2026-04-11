@@ -62,7 +62,6 @@ def safe_float_convert(val):
         return 0.0
 
 def parse_date_cell(val):
-    """将各种格式的日期值转换为 datetime.date 对象"""
     if pd.isna(val):
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
@@ -90,10 +89,9 @@ def parse_date_cell(val):
     return None
 
 def is_summary_row(row_cells):
-    """判断一行是否为汇总/统计行（应被跳过）"""
     summary_keywords = ['总金额', '总笔数', '汇总', '合计', '小计', '总计', '明细', '记录条数',
                         '账户名称', '币种', '打印时间', '打印期限', '起始日期', '截至日期',
-                        '收入总金额', '支出总金额', '收入总笔数', '支出总笔数']  # 增加华夏银行汇总关键词
+                        '收入总金额', '支出总金额', '收入总笔数', '支出总笔数']
     row_text = ' '.join(row_cells).lower()
     for kw in summary_keywords:
         if kw in row_text:
@@ -101,7 +99,6 @@ def is_summary_row(row_cells):
     return False
 
 def find_header_row(df, max_rows=100):
-    """查找表头行：跳过汇总行，找到包含多个关键词的行"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
@@ -112,13 +109,24 @@ def find_header_row(df, max_rows=100):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
         if is_summary_row(row_cells):
             continue
+        # 检查第一个单元格是否为纯数字（可能是数据行而不是表头）
+        first_cell = row_cells[0] if row_cells else ''
+        if first_cell.isdigit() and len(first_cell) <= 3:
+            continue
         match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
-    # 备用方案：寻找同时包含“序号”和“交易日期”的行（适用于华夏银行等）
+    return None
+
+def find_header_row_for_huaoxia(df, max_rows=100):
+    """专门为华夏银行查找表头行（包含“序号”和“交易日期”）"""
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).lower() for cell in df.iloc[i]]
-        if any('序号' in cell for cell in row_cells) and any('交易日期' in cell for cell in row_cells):
+        if is_summary_row(row_cells):
+            continue
+        has_xuhao = any('序号' in cell for cell in row_cells)
+        has_date = any('交易日期' in cell for cell in row_cells)
+        if has_xuhao and has_date:
             return i
     return None
 
@@ -143,7 +151,7 @@ def identify_columns_enhanced(df, sheet_name):
         'trans_time': None
     }
 
-    # 特殊处理：华夏银行（精确匹配列名）
+    # 华夏银行精确匹配
     if '华夏' in sheet_name:
         for col in df.columns:
             col_str = str(col).strip()
@@ -157,11 +165,10 @@ def identify_columns_enhanced(df, sheet_name):
                 mapping['amount_out'] = col
             elif col_str == '对方户名':
                 mapping['counterparty'] = col
-        # 如果找到了必要列，直接返回
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
-    # 特殊处理：厦门国际银行（智能厦门国际4285 等）
+    # 厦门国际银行
     if '厦门国际' in sheet_name or '智能厦门国际' in sheet_name:
         for col in df.columns:
             col_str = str(col).strip()
@@ -180,7 +187,7 @@ def identify_columns_enhanced(df, sheet_name):
         if mapping['date'] and (mapping['amount_in'] or mapping['amount_out']) and mapping['counterparty']:
             return mapping
 
-    # 通用匹配逻辑
+    # 通用匹配
     for col in df.columns:
         low = normalize_column_name(str(col))
         if not mapping['date'] and any(kw in low for kw in ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日']):
@@ -215,7 +222,6 @@ def identify_columns_enhanced(df, sheet_name):
         if not mapping['payee_name'] and any(kw in low for kw in ['收款人名称', '收款方名称']):
             mapping['payee_name'] = col
 
-    # 如果仍未匹配到收支列，尝试精确匹配列名“收入”“支出”“转入”“转出”
     if not mapping['amount_in']:
         for col in df.columns:
             if str(col).strip() in ('收入', '收入金额', '转入'):
@@ -261,7 +267,6 @@ def parse_sheet(df, sheet_name, mapping):
     if not date_col:
         return records
 
-    # 从 sheet 名称中推断币种
     inferred_currency = None
     if '欧元' in sheet_name:
         inferred_currency = 'EUR'
@@ -274,9 +279,7 @@ def parse_sheet(df, sheet_name, mapping):
 
     for idx, row in df.iterrows():
         try:
-            # ---------- 日期解析 ----------
             trans_datetime = None
-            # 优先使用交易日期+时间列（中行专用，或华夏银行）
             if trans_date_col and trans_time_col:
                 date_val = row.get(trans_date_col) if trans_date_col in df.columns else None
                 time_val = row.get(trans_time_col) if trans_time_col in df.columns else None
@@ -315,7 +318,6 @@ def parse_sheet(df, sheet_name, mapping):
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
 
-            # ---------- 金额和方向 ----------
             amount = 0.0
             direction = None
 
@@ -353,20 +355,15 @@ def parse_sheet(df, sheet_name, mapping):
             if amount == 0 or direction is None:
                 continue
 
-            # ---------- 对方名称 ----------
             counterparty = ''
-            # 优先使用指定的对方户名列
             if cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
                 candidate = str(row[cp_col]).strip()
                 if candidate not in ('', 'nan', 'None'):
                     counterparty = candidate
-            # 如果方向为收款，尝试从付款人名称获取
             if not counterparty and direction == 'in' and payer_col and payer_col in df.columns and pd.notna(row[payer_col]):
                 counterparty = str(row[payer_col]).strip()
-            # 如果方向为付款，尝试从收款人名称获取
             if not counterparty and direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
                 counterparty = str(row[payee_col]).strip()
-            # 兜底：尝试从“对方账户名称”列获取
             if not counterparty:
                 for col in df.columns:
                     if '对方账户名称' in str(col) or '对方户名' in str(col):
@@ -378,7 +375,6 @@ def parse_sheet(df, sheet_name, mapping):
             if not counterparty:
                 continue
 
-            # ---------- 币种 ----------
             currency = 'CNY'
             if curr_col and curr_col in df.columns and pd.notna(row[curr_col]):
                 curr = str(row[curr_col]).strip()
@@ -415,7 +411,6 @@ def parse_sheet(df, sheet_name, mapping):
                 'original_sheet': sheet_name
             })
         except Exception as e:
-            # 跳过单行解析错误
             st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
             continue
     return records
@@ -447,7 +442,11 @@ def load_all_transactions(uploaded_files):
                 df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
                 if df_raw.empty:
                     continue
-                header_row = find_header_row(df_raw)
+                # 针对华夏银行使用专用表头查找
+                if '华夏' in sheet_name:
+                    header_row = find_header_row_for_huaoxia(df_raw)
+                else:
+                    header_row = find_header_row(df_raw)
                 if header_row is None:
                     debug_info.append(f"⚠️ {file.name} - {sheet_name}: 未找到表头行")
                     sample = df_raw.iloc[:20, :5].to_string()
