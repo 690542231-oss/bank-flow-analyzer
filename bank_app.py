@@ -119,25 +119,24 @@ def find_header_row(df, max_rows=100):
     return None
 
 def find_header_row_for_huaoxia(df, max_rows=100):
-    """专门为华夏银行查找表头行：寻找包含“序号”和“交易日期”的行"""
+    """专门为华夏银行查找表头行"""
+    # 首先尝试通用方法
     for i in range(min(max_rows, len(df))):
         row_cells = [str(cell).strip() for cell in df.iloc[i]]
-        # 跳过明显的汇总行
         if is_summary_row(row_cells):
             continue
-        # 检查第一个单元格是否为“序号”（精确匹配或包含）
-        first_cell = row_cells[0] if len(row_cells) > 0 else ''
-        if first_cell == '序号' or '序号' in first_cell:
-            # 检查后续单元格是否包含“交易日期”
-            if any('交易日期' in cell for cell in row_cells[1:]):
+        # 条件1：第一列为“序号”，且后续列包含“交易日期”
+        if len(row_cells) >= 2:
+            if row_cells[0] == '序号' and '交易日期' in row_cells[1]:
                 return i
-    # 备用：寻找第一个包含“序号”且第二列包含“交易日期”的行
-    for i in range(min(max_rows, len(df))):
-        row_cells = [str(cell).strip() for cell in df.iloc[i]]
-        if is_summary_row(row_cells):
-            continue
+        # 条件2：任意位置同时包含“序号”和“交易日期”
         if any('序号' in cell for cell in row_cells) and any('交易日期' in cell for cell in row_cells):
             return i
+    # 后备方案：如果第7行（索引7）的第一个单元格为“序号”，则直接使用（针对已知文件结构）
+    if len(df) > 7:
+        first_cell = str(df.iloc[7, 0]).strip()
+        if first_cell == '序号':
+            return 7
     return None
 
 def normalize_column_name(col):
