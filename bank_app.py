@@ -91,14 +91,16 @@ def parse_date_cell(val):
     return None
 
 def find_header_row(df, max_rows=30):
+    """查找表头行：将每一行的所有单元格转为字符串后再匹配关键词"""
     keywords = ['交易时间', '交易日', '日期', '记账日期', '交易日期', '起息日',
                 '对方户名', '对方单位名称', '对方账号', '收款人名称', '付款人名称',
                 '贷方发生额', '借方发生额', '贷方金额', '借方金额', '收入', '支出',
                 '币种', '交易货币', '摘要', '附言', '用途', '借贷标志', '收支标志',
                 '交易类型', '业务类型']
     for i in range(min(max_rows, len(df))):
-        row = df.iloc[i].astype(str).str.lower()
-        match_count = sum(1 for kw in keywords if any(kw in cell for cell in row))
+        # 关键修复：将整行所有单元格显式转为字符串并小写
+        row_cells = [str(cell).lower() for cell in df.iloc[i]]
+        match_count = sum(1 for kw in keywords if any(kw in cell for cell in row_cells))
         if match_count >= 2:
             return i
     return None
@@ -112,6 +114,8 @@ def normalize_column_name(col):
     return col.lower()
 
 def identify_columns_enhanced(df, sheet_name):
+    # 确保列名都是字符串
+    df.columns = [str(col) for col in df.columns]
     mapping = {
         'date': None, 'counterparty': None, 'currency': None,
         'remark': None, 'purpose': None,
@@ -189,144 +193,149 @@ def parse_sheet(df, sheet_name, mapping):
         return records
 
     for idx, row in df.iterrows():
-        # ---------- 日期时间解析（针对中国银行特殊处理）----------
-        trans_datetime = None
-        if '中行' in sheet_name and trans_date_col and trans_time_col:
-            date_val = row.get(trans_date_col)
-            time_val = row.get(trans_time_col)
-            if pd.notna(date_val) and pd.notna(time_val):
-                try:
-                    # 处理日期：可能是整数 20260313 或字符串 "20260313"
-                    if isinstance(date_val, (int, float)):
-                        date_str = str(int(date_val))
-                        if len(date_str) == 8 and date_str.isdigit():
-                            date_obj = datetime.strptime(date_str, '%Y%m%d').date()
+        try:
+            # ---------- 日期时间解析（针对中国银行特殊处理）----------
+            trans_datetime = None
+            if '中行' in sheet_name and trans_date_col and trans_time_col:
+                date_val = row.get(trans_date_col)
+                time_val = row.get(trans_time_col)
+                if pd.notna(date_val) and pd.notna(time_val):
+                    try:
+                        # 处理日期：可能是整数 20260313 或字符串 "20260313"
+                        if isinstance(date_val, (int, float)):
+                            date_str = str(int(date_val))
+                            if len(date_str) == 8 and date_str.isdigit():
+                                date_obj = datetime.strptime(date_str, '%Y%m%d').date()
+                            else:
+                                # 回退到 Excel 序列号
+                                date_obj = (datetime(1899, 12, 30) + pd.Timedelta(days=int(date_val))).date()
                         else:
-                            # 回退到 Excel 序列号
-                            date_obj = (datetime(1899, 12, 30) + pd.Timedelta(days=int(date_val))).date()
-                    else:
-                        date_obj = pd.to_datetime(date_val).date()
-                    # 处理时间：可能是整数 143802 或字符串 "14:38:02"
-                    if isinstance(time_val, (int, float)):
-                        time_str = str(int(time_val)).zfill(6)  # 补齐6位
-                        if len(time_str) == 6 and time_str.isdigit():
-                            time_obj = datetime.strptime(time_str, '%H%M%S').time()
+                            date_obj = pd.to_datetime(date_val).date()
+                        # 处理时间：可能是整数 143802 或字符串 "14:38:02"
+                        if isinstance(time_val, (int, float)):
+                            time_str = str(int(time_val)).zfill(6)  # 补齐6位
+                            if len(time_str) == 6 and time_str.isdigit():
+                                time_obj = datetime.strptime(time_str, '%H%M%S').time()
+                            else:
+                                time_obj = datetime.strptime(str(time_val).split('.')[0], '%H:%M:%S').time()
+                        elif isinstance(time_val, str):
+                            if ':' in time_val:
+                                time_obj = datetime.strptime(time_val.split('.')[0], '%H:%M:%S').time()
+                            else:
+                                # 纯数字字符串如 "143802"
+                                time_str = time_val.zfill(6)
+                                time_obj = datetime.strptime(time_str, '%H%M%S').time()
                         else:
                             time_obj = datetime.strptime(str(time_val).split('.')[0], '%H:%M:%S').time()
-                    elif isinstance(time_val, str):
-                        if ':' in time_val:
-                            time_obj = datetime.strptime(time_val.split('.')[0], '%H:%M:%S').time()
-                        else:
-                            # 纯数字字符串如 "143802"
-                            time_str = time_val.zfill(6)
-                            time_obj = datetime.strptime(time_str, '%H%M%S').time()
-                    else:
-                        time_obj = datetime.strptime(str(time_val).split('.')[0], '%H:%M:%S').time()
-                    trans_datetime = datetime.combine(date_obj, time_obj)
-                except Exception as e:
-                    # 组合失败，回退到原逻辑
-                    pass
+                        trans_datetime = datetime.combine(date_obj, time_obj)
+                    except Exception as e:
+                        # 组合失败，回退到原逻辑
+                        pass
 
-        # 如果中行组合失败或非中行，使用原有单列日期解析
-        if trans_datetime is None:
-            date_val = row.get(date_col)
-            parsed_date = parse_date_cell(date_val)
-            if parsed_date is None:
-                continue
-            trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+            # 如果中行组合失败或非中行，使用原有单列日期解析
+            if trans_datetime is None:
+                date_val = row.get(date_col)
+                parsed_date = parse_date_cell(date_val)
+                if parsed_date is None:
+                    continue
+                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
 
-        # ---------- 金额和方向 ----------
-        amount = 0.0
-        direction = None
+            # ---------- 金额和方向 ----------
+            amount = 0.0
+            direction = None
 
-        in_col = mapping.get('amount_in')
-        out_col = mapping.get('amount_out')
-        if in_col and in_col in df.columns:
-            amt = safe_float_convert(row[in_col])
-            if amt > 0:
-                amount = amt
-                direction = 'in'
-        if amount == 0 and out_col and out_col in df.columns:
-            amt = safe_float_convert(row[out_col])
-            if amt > 0:
-                amount = amt
-                direction = 'out'
-
-        if amount == 0:
-            amount_col = mapping.get('amount')
-            if amount_col and amount_col in df.columns:
-                amt = safe_float_convert(row[amount_col])
+            in_col = mapping.get('amount_in')
+            out_col = mapping.get('amount_out')
+            if in_col and in_col in df.columns:
+                amt = safe_float_convert(row[in_col])
                 if amt > 0:
                     amount = amt
                     direction = 'in'
-                elif amt < 0:
-                    amount = -amt
+            if amount == 0 and out_col and out_col in df.columns:
+                amt = safe_float_convert(row[out_col])
+                if amt > 0:
+                    amount = amt
                     direction = 'out'
 
-        if amount > 0 and direction is None and trans_type_col and trans_type_col in df.columns:
-            trans_type = str(row[trans_type_col]).strip()
-            if trans_type in ('往账', '支出', '付款', 'debit'):
-                direction = 'out'
-            elif trans_type in ('来账', '收入', '收款', 'credit'):
-                direction = 'in'
+            if amount == 0:
+                amount_col = mapping.get('amount')
+                if amount_col and amount_col in df.columns:
+                    amt = safe_float_convert(row[amount_col])
+                    if amt > 0:
+                        amount = amt
+                        direction = 'in'
+                    elif amt < 0:
+                        amount = -amt
+                        direction = 'out'
 
-        if amount == 0 or direction is None:
+            if amount > 0 and direction is None and trans_type_col and trans_type_col in df.columns:
+                trans_type = str(row[trans_type_col]).strip()
+                if trans_type in ('往账', '支出', '付款', 'debit'):
+                    direction = 'out'
+                elif trans_type in ('来账', '收入', '收款', 'credit'):
+                    direction = 'in'
+
+            if amount == 0 or direction is None:
+                continue
+
+            # ---------- 对方名称 ----------
+            counterparty = ''
+            if direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
+                counterparty = str(row[payee_col]).strip()
+            elif direction == 'in' and payer_col and payer_col in df.columns and pd.notna(row[payer_col]):
+                counterparty = str(row[payer_col]).strip()
+
+            if not counterparty and cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
+                candidate = str(row[cp_col]).strip()
+                if candidate not in ('', 'nan', 'None', '对公往来账户', '对公信贷-DPS系统间往来'):
+                    counterparty = candidate
+
+            if not counterparty and direction == 'out' and payee_col and payee_col in df.columns:
+                counterparty = str(row[payee_col]).strip()
+            if not counterparty and direction == 'in' and payer_col and payer_col in df.columns:
+                counterparty = str(row[payer_col]).strip()
+
+            if not counterparty:
+                continue
+
+            # ---------- 币种 ----------
+            currency = 'CNY'
+            if curr_col and curr_col in df.columns and pd.notna(row[curr_col]):
+                curr = str(row[curr_col]).strip()
+                if curr in ['人民币元', '人民币', 'CNY', 'RMB']:
+                    currency = 'CNY'
+                elif curr in ['美元', 'USD']:
+                    currency = 'USD'
+                elif curr in ['欧元', 'EUR']:
+                    currency = 'EUR'
+                elif curr in ['港币', 'HKD']:
+                    currency = 'HKD'
+                else:
+                    currency = curr.upper()
+
+            remark = ''
+            if remark_col and remark_col in df.columns and pd.notna(row[remark_col]):
+                remark = str(row[remark_col])
+            purpose = ''
+            if purpose_col and purpose_col in df.columns and pd.notna(row[purpose_col]):
+                purpose = str(row[purpose_col])
+            if '附言' in df.columns and pd.notna(row['附言']):
+                purpose += ' ' + str(row['附言'])
+
+            records.append({
+                'date': trans_datetime,
+                'amount': amount,
+                'direction': direction,
+                'counterparty': counterparty,
+                'currency': currency,
+                'remark': remark,
+                'purpose': purpose,
+                'original_sheet': sheet_name
+            })
+        except Exception as e:
+            # 跳过单行解析错误，避免整个工作表崩溃
+            st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
             continue
-
-        # ---------- 对方名称 ----------
-        counterparty = ''
-        if direction == 'out' and payee_col and payee_col in df.columns and pd.notna(row[payee_col]):
-            counterparty = str(row[payee_col]).strip()
-        elif direction == 'in' and payer_col and payer_col in df.columns and pd.notna(row[payer_col]):
-            counterparty = str(row[payer_col]).strip()
-
-        if not counterparty and cp_col and cp_col in df.columns and pd.notna(row[cp_col]):
-            candidate = str(row[cp_col]).strip()
-            if candidate not in ('', 'nan', 'None', '对公往来账户', '对公信贷-DPS系统间往来'):
-                counterparty = candidate
-
-        if not counterparty and direction == 'out' and payee_col and payee_col in df.columns:
-            counterparty = str(row[payee_col]).strip()
-        if not counterparty and direction == 'in' and payer_col and payer_col in df.columns:
-            counterparty = str(row[payer_col]).strip()
-
-        if not counterparty:
-            continue
-
-        # ---------- 币种 ----------
-        currency = 'CNY'
-        if curr_col and curr_col in df.columns and pd.notna(row[curr_col]):
-            curr = str(row[curr_col]).strip()
-            if curr in ['人民币元', '人民币', 'CNY', 'RMB']:
-                currency = 'CNY'
-            elif curr in ['美元', 'USD']:
-                currency = 'USD'
-            elif curr in ['欧元', 'EUR']:
-                currency = 'EUR'
-            elif curr in ['港币', 'HKD']:
-                currency = 'HKD'
-            else:
-                currency = curr.upper()
-
-        remark = ''
-        if remark_col and remark_col in df.columns and pd.notna(row[remark_col]):
-            remark = str(row[remark_col])
-        purpose = ''
-        if purpose_col and purpose_col in df.columns and pd.notna(row[purpose_col]):
-            purpose = str(row[purpose_col])
-        if '附言' in df.columns and pd.notna(row['附言']):
-            purpose += ' ' + str(row['附言'])
-
-        records.append({
-            'date': trans_datetime,
-            'amount': amount,
-            'direction': direction,
-            'counterparty': counterparty,
-            'currency': currency,
-            'remark': remark,
-            'purpose': purpose,
-            'original_sheet': sheet_name
-        })
     return records
 
 def load_all_transactions(uploaded_files):
@@ -338,7 +347,18 @@ def load_all_transactions(uploaded_files):
     ]
     debug_info = []
     for file in uploaded_files:
-        xls = pd.ExcelFile(file)
+        # 根据文件扩展名选择引擎，确保 .xls 使用 xlrd，.xlsx 使用 openpyxl
+        filename = file.name
+        if filename.endswith('.xls') and not filename.endswith('.xlsx'):
+            engine = 'xlrd'
+        else:
+            engine = 'openpyxl'
+        try:
+            xls = pd.ExcelFile(file, engine=engine)
+        except Exception as e:
+            st.error(f"无法读取文件 {filename}: {e}")
+            continue
+
         for sheet_name in xls.sheet_names:
             if any(kw in sheet_name.lower() for kw in ['保证金', '汇总', '合计', 'balance']):
                 continue
