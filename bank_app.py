@@ -713,7 +713,7 @@ def parse_acceptance_payments(uploaded_files):
             st.text(info)
     return acceptance_records
 
-# ================= 新增银承收款解析 =================
+# ================= 银承收款解析（取“付款人”列） =================
 def identify_acceptance_receipt_columns(df):
     """识别银承收款表格的列名：出票日期、付款人、票面金额 (元)"""
     mapping = {'date': None, 'counterparty': None, 'amount': None}
@@ -721,14 +721,15 @@ def identify_acceptance_receipt_columns(df):
         col_str = str(col).strip().lower()
         if not mapping['date'] and any(kw in col_str for kw in ['出票日期', '出票日', '开票日期', '日期']):
             mapping['date'] = col
-        if not mapping['counterparty'] and any(kw in col_str for kw in ['付款人', '出票人', '付款单位', '对方名称']):
+        # 关键修改：收款方应为“付款人”（即付钱给我方的人）
+        if not mapping['counterparty'] and any(kw in col_str for kw in ['付款人', '付款单位', '对方名称']):
             mapping['counterparty'] = col
         if not mapping['amount'] and any(kw in col_str for kw in ['票面金额', '金额', '票面金额 (元)']):
             mapping['amount'] = col
     return mapping
 
 def parse_acceptance_receipts(uploaded_files):
-    """解析融资报文件中的银承收款记录"""
+    """解析融资报文件中的银承收款记录（收款方取付款人）"""
     acceptance_records = []
     debug_info = []
     for file in uploaded_files:
@@ -793,6 +794,7 @@ def parse_acceptance_receipts(uploaded_files):
                 if amount <= 0:
                     continue
 
+                # 收款方取“付款人”
                 counterparty = str(row.get(mapping['counterparty'])).strip()
                 if not counterparty or counterparty.lower() in ('nan', 'none', ''):
                     continue
@@ -800,7 +802,7 @@ def parse_acceptance_receipts(uploaded_files):
                 acceptance_records.append({
                     'date': trans_datetime,
                     'amount': amount,
-                    'direction': 'in',   # 收款
+                    'direction': 'in',
                     'counterparty': counterparty,
                     'currency': 'CNY',
                     'remark': '银承收款',
@@ -878,7 +880,7 @@ def main():
     with st.sidebar:
         st.header("📂 数据上传")
         st.markdown("**支持的文件格式：** XLSX, XLS（每个文件不超过200MB）")
-        st.markdown("**银承识别：** 文件名包含“融资报”且工作表名包含“银承”的表格将自动解析为银承付款；工作表名“银承收款”自动解析为银承收款")
+        st.markdown("**银承识别：** 文件名包含“融资报”且工作表名包含“银承”的表格将自动解析为银承付款；工作表名包含“银承收款”自动解析为银承收款（收款方取“付款人”列）。")
         uploaded_files = st.file_uploader("请选择银行流水Excel文件（可多选）", type=['xlsx', 'xls'], accept_multiple_files=True, label_visibility="collapsed")
         
         st.header("⚙️ 参数设置")
