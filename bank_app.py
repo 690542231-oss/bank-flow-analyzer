@@ -449,7 +449,7 @@ def parse_sheet(df, sheet_name, mapping, sheet_currency=None):
                 'remark': remark,
                 'purpose': purpose,
                 'original_sheet': sheet_name,
-                'payment_method': 'wire'   # 标记为电汇
+                'payment_method': 'wire'
             })
         except Exception as e:
             st.warning(f"跳过 {sheet_name} 第 {idx} 行，解析失败: {e}")
@@ -588,12 +588,14 @@ def load_wire_transactions(uploaded_files):
             st.text(info)
     return all_trans
 
+# ================= 优化后的银承解析函数 =================
 def identify_acceptance_columns(df):
-    """识别银承表格的列名：出票日期、收款单位、票面金额"""
+    """识别银承表格的列名：出票日/出票日期、收款单位、票面金额"""
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
         col_str = str(col).strip().lower()
-        if not mapping['date'] and any(kw in col_str for kw in ['出票日期', '开票日期', '票据日期', '汇票日期']):
+        # 支持“出票日”或“出票日期”
+        if not mapping['date'] and any(kw in col_str for kw in ['出票日', '出票日期', '开票日期', '票据日期', '汇票日期']):
             mapping['date'] = col
         if not mapping['counterparty'] and any(kw in col_str for kw in ['收款单位', '收款人', '收款方', '收款单位名称']):
             mapping['counterparty'] = col
@@ -602,7 +604,7 @@ def identify_acceptance_columns(df):
     return mapping
 
 def parse_acceptance_payments(uploaded_files):
-    """解析融资报文件中的银承付款记录"""
+    """解析融资报文件中的银承付款记录（支持两行表头结构）"""
     acceptance_records = []
     debug_info = []
     for file in uploaded_files:
@@ -615,7 +617,6 @@ def parse_acceptance_payments(uploaded_files):
             st.error(f"无法读取融资报文件 {filename}: {e}")
             continue
 
-        # 查找名为“银承”的工作表
         target_sheet = None
         for sheet in xls.sheet_names:
             if '银承' in sheet:
@@ -625,69 +626,84 @@ def parse_acceptance_payments(uploaded_files):
             debug_info.append(f"⚠️ {filename}: 未找到包含'银承'的工作表")
             continue
 
-        try:
-            # 尝试自动检测表头行
-            df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
-            header_row = None
-            for i in range(min(20, len(df_raw))):
-                row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                if any('出票日期' in cell for cell in row_cells) or any('收款单位' in cell for cell in row_cells):
-                    header_row = i
-                    break
-            if header_row is None:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 未找到银承表头行，跳过")
-                continue
-
+        # 尝试两种表头模式：自动检测 或 固定使用第2行（索引1）作为表头
+        success = False
+        # 模式1：自动检测包含“收款单位”的行作为表头（兼容旧格式）
+        df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+        header_row = None
+        for i in range(min(20, len(df_raw))):
+            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+            if any('收款单位' in cell for cell in row_cells):
+                header_row = i
+                break
+        if header_row is not None:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
             mapping = identify_acceptance_columns(df_data)
-            if not mapping['date'] or not mapping['counterparty'] or not mapping['amount']:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 列识别失败，缺少必要列。映射: {mapping}")
-                continue
+            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                success = True
+                debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功")
+            else:
+                debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+        # 模式2：若自动检测失败，尝试使用第2行（索引1）作为表头（常见格式：第一行主列名，第二行子列名）
+        if not success:
+            # 检查第2行是否包含“出票日”或“收款单位”等关键字段
+            if len(df_raw) > 1:
+                second_row = [str(cell).strip() for cell in df_raw.iloc[1]]
+                if any('出票日' in cell for cell in second_row) or any('收款单位' in cell for cell in second_row):
+                    df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)  # 第二行为列名
+                    mapping = identify_acceptance_columns(df_data)
+                    if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                        success = True
+                        debug_info.append(f"✅ {filename} - {target_sheet}: 使用第二行作为表头成功")
+                    else:
+                        debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
 
-            for idx, row in df_data.iterrows():
-                try:
-                    date_val = row.get(mapping['date'])
-                    parsed_date = parse_date_cell(date_val)
-                    if parsed_date is None:
-                        continue
-                    trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+        if not success:
+            debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承表格结构，跳过")
+            continue
 
-                    amount = safe_float_convert(row.get(mapping['amount']))
-                    if amount <= 0:
-                        continue
+        # 解析每一行数据
+        for idx, row in df_data.iterrows():
+            try:
+                date_val = row.get(mapping['date'])
+                parsed_date = parse_date_cell(date_val)
+                if parsed_date is None:
+                    continue
+                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
 
-                    counterparty = str(row.get(mapping['counterparty'])).strip()
-                    if not counterparty or counterparty.lower() in ('nan', 'none', ''):
-                        continue
-
-                    # 银承付款统一为人民币，方向为out
-                    acceptance_records.append({
-                        'date': trans_datetime,
-                        'amount': amount,
-                        'direction': 'out',
-                        'counterparty': counterparty,
-                        'currency': 'CNY',
-                        'remark': '银承付款',
-                        'purpose': '',
-                        'original_sheet': f"{filename} - {target_sheet}",
-                        'payment_method': 'acceptance'
-                    })
-                except Exception as e:
-                    st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
+                amount = safe_float_convert(row.get(mapping['amount']))
+                if amount <= 0:
                     continue
 
-            if acceptance_records:
-                st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承付款记录")
-            else:
-                st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承记录")
+                counterparty = str(row.get(mapping['counterparty'])).strip()
+                if not counterparty or counterparty.lower() in ('nan', 'none', ''):
+                    continue
 
-        except Exception as e:
-            st.error(f"解析融资报文件 {filename} 工作表 {target_sheet} 失败: {e}")
+                acceptance_records.append({
+                    'date': trans_datetime,
+                    'amount': amount,
+                    'direction': 'out',
+                    'counterparty': counterparty,
+                    'currency': 'CNY',
+                    'remark': '银承付款',
+                    'purpose': '',
+                    'original_sheet': f"{filename} - {target_sheet}",
+                    'payment_method': 'acceptance'
+                })
+            except Exception as e:
+                st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
+                continue
+
+        if acceptance_records:
+            st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承付款记录")
+        else:
+            st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承记录")
 
     with st.sidebar.expander("🔧 调试信息（银承）", expanded=False):
         for info in debug_info:
             st.text(info)
     return acceptance_records
+# =====================================================
 
 def convert_to_cny(transactions, rates):
     for t in transactions:
@@ -697,7 +713,6 @@ def convert_to_cny(transactions, rates):
     return transactions
 
 def get_top_counterparties(transactions, direction, top_n=20, payment_method=None):
-    """通用排名函数，可筛选方向和付款方式"""
     filtered = [t for t in transactions if t['direction'] == direction]
     if payment_method is not None:
         filtered = [t for t in filtered if t.get('payment_method') == payment_method]
@@ -723,7 +738,6 @@ def get_top_counterparties(transactions, direction, top_n=20, payment_method=Non
     return result, summary
 
 def get_combined_payer_rank(transactions, top_n=20):
-    """计算电汇+银承合计付款排名"""
     payers = [t for t in transactions if t['direction'] == 'out']
     if not payers:
         return []
@@ -760,9 +774,7 @@ def main():
                 st.error("请至少上传一个文件")
                 return
             with st.spinner("正在解析数据，请稍候..."):
-                # 加载电汇交易
                 wire_trans = load_wire_transactions(uploaded_files)
-                # 加载银承付款
                 acceptance_trans = parse_acceptance_payments(uploaded_files)
                 all_transactions = wire_trans + acceptance_trans
                 if not all_transactions:
@@ -799,13 +811,11 @@ def main():
         st.warning("当前筛选范围内无交易数据")
         return
     
-    # 生成各排名
     top_payees, _ = get_top_counterparties(filtered, 'in', top_n=rank_limit, payment_method='wire')
     top_payers_wire, _ = get_top_counterparties(filtered, 'out', top_n=rank_limit, payment_method='wire')
     top_payers_acceptance, _ = get_top_counterparties(filtered, 'out', top_n=rank_limit, payment_method='acceptance')
     combined_payers = get_combined_payer_rank(filtered, top_n=rank_limit)
     
-    # 创建5个标签页
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         f"📥 电汇收款方排名 (Top {rank_limit})",
         f"📤 电汇付款方排名 (Top {rank_limit})",
@@ -814,7 +824,6 @@ def main():
         "🔍 交易明细查询"
     ])
     
-    # 辅助函数：显示排名列表，支持点击查看明细
     def display_rank_list(rank_list, title_prefix, direction, payment_method_filter=None):
         if not rank_list:
             st.info(f"无{title_prefix}记录")
@@ -842,13 +851,10 @@ def main():
     
     with tab1:
         display_rank_list(top_payees, "电汇收款方", "in", "wire")
-    
     with tab2:
         display_rank_list(top_payers_wire, "电汇付款方", "out", "wire")
-    
     with tab3:
         display_rank_list(top_payers_acceptance, "银承付款方", "out", "acceptance")
-    
     with tab4:
         if combined_payers:
             st.subheader(f"合计付款方排名（电汇+银承，按折合人民币合计金额）")
@@ -864,10 +870,9 @@ def main():
                     if st.button(f"查看 {company} 全部付款明细", key=f"combined_{company}_{idx}"):
                         st.session_state['selected_company'] = company
                         st.session_state['selected_direction'] = 'out'
-                        st.session_state['selected_payment_method'] = None  # 显示所有付款方式
+                        st.session_state['selected_payment_method'] = None
         else:
             st.info("无付款记录")
-    
     with tab5:
         st.subheader("按公司名称搜索交易明细（含电汇及银承）")
         search_term = st.text_input("输入对方公司名称关键词（模糊匹配）")
@@ -896,7 +901,6 @@ def main():
             else:
                 st.info("未找到匹配记录")
     
-    # 处理从排名点击进入的明细展示
     if 'selected_company' in st.session_state and st.session_state['selected_company']:
         company = st.session_state['selected_company']
         direction = st.session_state['selected_direction']
@@ -932,7 +936,6 @@ def main():
         else:
             st.info("无明细数据")
     
-    # 下载报告（包含所有交易和排名）
     st.sidebar.header("💾 下载分析报告")
     if st.sidebar.button("生成并下载完整报告", use_container_width=True):
         report_data = []
