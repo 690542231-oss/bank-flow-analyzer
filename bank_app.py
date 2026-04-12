@@ -590,12 +590,12 @@ def load_wire_transactions(uploaded_files):
 
 # ================= 优化后的银承解析函数 =================
 def identify_acceptance_columns(df):
-    """识别银承表格的列名：出票日/出票日期、收款单位、票面金额"""
+    """识别银承表格的列名：出票日/出票日期/日期、收款单位、票面金额"""
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
         col_str = str(col).strip().lower()
-        # 支持“出票日”或“出票日期”
-        if not mapping['date'] and any(kw in col_str for kw in ['出票日', '出票日期', '开票日期', '票据日期', '汇票日期']):
+        # 支持“出票日”、“出票日期”、“日期”
+        if not mapping['date'] and any(kw in col_str for kw in ['出票日', '出票日期', '开票日期', '票据日期', '汇票日期', '日期']):
             mapping['date'] = col
         if not mapping['counterparty'] and any(kw in col_str for kw in ['收款单位', '收款人', '收款方', '收款单位名称']):
             mapping['counterparty'] = col
@@ -626,41 +626,52 @@ def parse_acceptance_payments(uploaded_files):
             debug_info.append(f"⚠️ {filename}: 未找到包含'银承'的工作表")
             continue
 
-        # 尝试两种表头模式：自动检测 或 固定使用第2行（索引1）作为表头
         success = False
-        # 模式1：自动检测包含“收款单位”的行作为表头（兼容旧格式）
         df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
-        header_row = None
-        for i in range(min(20, len(df_raw))):
-            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-            if any('收款单位' in cell for cell in row_cells):
-                header_row = i
-                break
-        if header_row is not None:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+        
+        # 策略1：尝试使用第二行作为表头（索引1，因为常见格式第一行主标题，第二行子标题）
+        if len(df_raw) > 1:
+            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)
             mapping = identify_acceptance_columns(df_data)
             if mapping['date'] and mapping['counterparty'] and mapping['amount']:
                 success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功")
+                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第二行作为表头成功，映射: {mapping}")
             else:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
-        # 模式2：若自动检测失败，尝试使用第2行（索引1）作为表头（常见格式：第一行主列名，第二行子列名）
+                debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
+        
+        # 策略2：如果策略1失败，尝试自动查找包含“收款单位”的行作为表头
         if not success:
-            # 检查第2行是否包含“出票日”或“收款单位”等关键字段
-            if len(df_raw) > 1:
-                second_row = [str(cell).strip() for cell in df_raw.iloc[1]]
-                if any('出票日' in cell for cell in second_row) or any('收款单位' in cell for cell in second_row):
-                    df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)  # 第二行为列名
-                    mapping = identify_acceptance_columns(df_data)
-                    if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                        success = True
-                        debug_info.append(f"✅ {filename} - {target_sheet}: 使用第二行作为表头成功")
-                    else:
-                        debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
-
+            header_row = None
+            for i in range(min(20, len(df_raw))):
+                row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                if any('收款单位' in cell for cell in row_cells):
+                    header_row = i
+                    break
+            if header_row is not None:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+                mapping = identify_acceptance_columns(df_data)
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+        
+        # 策略3：如果仍然失败，尝试使用第一行作为表头（可能列名为“日期”）
         if not success:
-            debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承表格结构，跳过")
-            continue
+            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
+            mapping = identify_acceptance_columns(df_data)
+            # 如果仍未找到日期列，尝试查找列名为“日期”的列
+            if not mapping['date']:
+                for col in df_data.columns:
+                    if str(col).strip() == '日期':
+                        mapping['date'] = col
+                        break
+            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                success = True
+                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
+            else:
+                debug_info.append(f"❌ {filename} - {target_sheet}: 所有策略均无法识别银承表格结构，跳过")
+                continue
 
         # 解析每一行数据
         for idx, row in df_data.iterrows():
