@@ -487,6 +487,29 @@ def load_wire_transactions(uploaded_files):
                 header_row = None
                 sheet_currency = None
 
+                # 珠海农商银行特殊处理：提取币种信息（表头上方有“币种:”行）
+                if '珠海农商' in sheet_name:
+                    # 在前10行中查找“币种:”所在行
+                    for i in range(min(10, len(df_raw))):
+                        row_text = ' '.join([str(cell) for cell in df_raw.iloc[i]])
+                        if '币种:' in row_text:
+                            # 提取币种，例如“币种: 欧元”
+                            match = re.search(r'币种:\s*(\S+)', row_text)
+                            if match:
+                                curr_text = match.group(1)
+                                if curr_text in ['欧元', 'EUR']:
+                                    sheet_currency = 'EUR'
+                                elif curr_text in ['美元', 'USD']:
+                                    sheet_currency = 'USD'
+                                elif curr_text in ['港币', 'HKD']:
+                                    sheet_currency = 'HKD'
+                                elif curr_text in ['英镑', 'GBP']:
+                                    sheet_currency = 'GBP'
+                                else:
+                                    sheet_currency = 'CNY'
+                                debug_info.append(f"🔍 {file.name} - {sheet_name}: 从表头提取币种 = {sheet_currency}")
+                            break
+
                 # 意大利子公司特殊处理
                 if '意大利子公司' in sheet_name or 'ZONSON SMART AUTO ITALIA' in sheet_name or '意大利' in sheet_name:
                     debug_info.append(f"🔍 {file.name} - {sheet_name}: 使用意大利子公司专用解析器")
@@ -577,7 +600,7 @@ def load_wire_transactions(uploaded_files):
                     debug_info.append(f"📄 {file.name}/{sheet_name} 示例: {sample['direction']} {sample['counterparty'][:30]} {sample['amount']} {sample['currency']} 日期:{sample['date']}")
                 else:
                     st.info(f"ℹ️ {file.name} - {sheet_name}: 解析到0条有效外部电汇交易")
-                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, amount={mapping['amount']}, currency={mapping['currency']}")
+                    debug_info.append(f"🔍 {file.name}/{sheet_name} 映射: date={mapping['date']}, counterparty={mapping['counterparty']}, amount_in={mapping['amount_in']}, amount_out={mapping['amount_out']}, amount={mapping['amount']}, currency={mapping['currency']}, sheet_currency={sheet_currency}")
                     if len(df_data) > 0:
                         sample_rows = df_data.head(3).iloc[:, :5].to_string()
                         debug_info.append(f"   前3行数据示例:\n{sample_rows}")
@@ -618,7 +641,7 @@ def parse_acceptance_payments(uploaded_files):
 
         target_sheet = None
         for sheet in xls.sheet_names:
-            if '银承' in sheet and '收款' not in sheet:  # 排除“银承收款”工作表
+            if '银承' in sheet and '收款' not in sheet:
                 target_sheet = sheet
                 break
         if target_sheet is None:
@@ -721,7 +744,6 @@ def identify_acceptance_receipt_columns(df):
         col_str = str(col).strip().lower()
         if not mapping['date'] and any(kw in col_str for kw in ['出票日期', '出票日', '开票日期', '日期']):
             mapping['date'] = col
-        # 关键修改：收款方应为“付款人”（即付钱给我方的人）
         if not mapping['counterparty'] and any(kw in col_str for kw in ['付款人', '付款单位', '对方名称']):
             mapping['counterparty'] = col
         if not mapping['amount'] and any(kw in col_str for kw in ['票面金额', '金额', '票面金额 (元)']):
@@ -794,7 +816,6 @@ def parse_acceptance_receipts(uploaded_files):
                 if amount <= 0:
                     continue
 
-                # 收款方取“付款人”
                 counterparty = str(row.get(mapping['counterparty'])).strip()
                 if not counterparty or counterparty.lower() in ('nan', 'none', ''):
                     continue
