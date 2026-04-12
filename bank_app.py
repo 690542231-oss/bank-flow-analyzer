@@ -289,7 +289,7 @@ def identify_columns_enhanced(df, sheet_name):
                     break
     return mapping
 
-def parse_sheet(df, sheet_name, mapping, sheet_currency=None):
+def parse_sheet(df, sheet_name, mapping, sheet_currency=None, start_date=None, end_date=None):
     records = []
     date_col = mapping.get('date')
     curr_col = mapping.get('currency')
@@ -357,6 +357,11 @@ def parse_sheet(df, sheet_name, mapping, sheet_currency=None):
                 if parsed_date is None:
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+
+            # 日期范围过滤
+            if start_date and end_date:
+                if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                    continue
 
             amount = 0.0
             direction = None
@@ -456,8 +461,8 @@ def parse_sheet(df, sheet_name, mapping, sheet_currency=None):
             continue
     return records
 
-def load_wire_transactions(uploaded_files):
-    """加载银行流水（电汇）交易"""
+def load_wire_transactions(uploaded_files, start_date=None, end_date=None):
+    """加载银行流水（电汇）交易，支持日期范围过滤"""
     all_trans = []
     internal_companies = [
         '珠海市广通客车有限公司', '中兴智能汽车有限公司',
@@ -487,13 +492,11 @@ def load_wire_transactions(uploaded_files):
                 header_row = None
                 sheet_currency = None
 
-                # 珠海农商银行特殊处理：提取币种信息（表头上方有“币种:”行）
+                # 珠海农商银行特殊处理：提取币种信息
                 if '珠海农商' in sheet_name:
-                    # 在前10行中查找“币种:”所在行
                     for i in range(min(10, len(df_raw))):
                         row_text = ' '.join([str(cell) for cell in df_raw.iloc[i]])
                         if '币种:' in row_text:
-                            # 提取币种，例如“币种: 欧元”
                             match = re.search(r'币种:\s*(\S+)', row_text)
                             if match:
                                 curr_text = match.group(1)
@@ -542,7 +545,7 @@ def load_wire_transactions(uploaded_files):
                                 mapping['counterparty'] = df_data.columns[8]
                             if mapping['currency'] is None and len(df_data.columns) > 2:
                                 mapping['currency'] = df_data.columns[2]
-                            records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
+                            records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency, start_date=start_date, end_date=end_date)
                             filtered = [r for r in records if r['counterparty'] not in internal_companies]
                             all_trans.extend(filtered)
                             if filtered:
@@ -591,7 +594,7 @@ def load_wire_transactions(uploaded_files):
                     continue
 
                 mapping = identify_columns_enhanced(df_data, sheet_name)
-                records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency)
+                records = parse_sheet(df_data, sheet_name, mapping, sheet_currency=sheet_currency, start_date=start_date, end_date=end_date)
                 filtered = [r for r in records if r['counterparty'] not in internal_companies]
                 all_trans.extend(filtered)
                 if filtered:
@@ -613,7 +616,6 @@ def load_wire_transactions(uploaded_files):
 
 # ================= 银承付款解析 =================
 def identify_acceptance_columns(df):
-    """识别银承付款表格的列名：出票日/出票日期、收款单位、票面金额"""
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
         col_str = str(col).strip().lower()
@@ -625,8 +627,7 @@ def identify_acceptance_columns(df):
             mapping['amount'] = col
     return mapping
 
-def parse_acceptance_payments(uploaded_files):
-    """解析融资报文件中的银承付款记录（支持两行表头结构）"""
+def parse_acceptance_payments(uploaded_files, start_date=None, end_date=None):
     acceptance_records = []
     debug_info = []
     for file in uploaded_files:
@@ -651,7 +652,6 @@ def parse_acceptance_payments(uploaded_files):
         success = False
         df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
         
-        # 策略1：尝试使用第二行作为表头（索引1）
         if len(df_raw) > 1:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)
             mapping = identify_acceptance_columns(df_data)
@@ -661,7 +661,6 @@ def parse_acceptance_payments(uploaded_files):
             else:
                 debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
         
-        # 策略2：如果失败，尝试自动查找包含“收款单位”的行
         if not success:
             header_row = None
             for i in range(min(20, len(df_raw))):
@@ -678,7 +677,6 @@ def parse_acceptance_payments(uploaded_files):
                 else:
                     debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
         
-        # 策略3：尝试使用第一行并额外匹配“日期”列
         if not success:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
             mapping = identify_acceptance_columns(df_data)
@@ -694,7 +692,6 @@ def parse_acceptance_payments(uploaded_files):
                 debug_info.append(f"❌ {filename} - {target_sheet}: 所有策略均无法识别银承表格结构，跳过")
                 continue
 
-        # 解析数据
         for idx, row in df_data.iterrows():
             try:
                 date_val = row.get(mapping['date'])
@@ -702,6 +699,9 @@ def parse_acceptance_payments(uploaded_files):
                 if parsed_date is None:
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                if start_date and end_date:
+                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                        continue
 
                 amount = safe_float_convert(row.get(mapping['amount']))
                 if amount <= 0:
@@ -736,9 +736,8 @@ def parse_acceptance_payments(uploaded_files):
             st.text(info)
     return acceptance_records
 
-# ================= 银承收款解析（取“付款人”列） =================
+# ================= 银承收款解析 =================
 def identify_acceptance_receipt_columns(df):
-    """识别银承收款表格的列名：出票日期、付款人、票面金额 (元)"""
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
         col_str = str(col).strip().lower()
@@ -750,8 +749,7 @@ def identify_acceptance_receipt_columns(df):
             mapping['amount'] = col
     return mapping
 
-def parse_acceptance_receipts(uploaded_files):
-    """解析融资报文件中的银承收款记录（收款方取付款人）"""
+def parse_acceptance_receipts(uploaded_files, start_date=None, end_date=None):
     acceptance_records = []
     debug_info = []
     for file in uploaded_files:
@@ -776,7 +774,6 @@ def parse_acceptance_receipts(uploaded_files):
         success = False
         df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
         
-        # 策略1：尝试自动查找包含“付款人”的行作为表头
         header_row = None
         for i in range(min(20, len(df_raw))):
             row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
@@ -792,7 +789,6 @@ def parse_acceptance_receipts(uploaded_files):
             else:
                 debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
         
-        # 策略2：尝试使用第一行作为表头
         if not success:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
             mapping = identify_acceptance_receipt_columns(df_data)
@@ -803,7 +799,6 @@ def parse_acceptance_receipts(uploaded_files):
                 debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承收款表格结构，跳过")
                 continue
 
-        # 解析数据
         for idx, row in df_data.iterrows():
             try:
                 date_val = row.get(mapping['date'])
@@ -811,6 +806,9 @@ def parse_acceptance_receipts(uploaded_files):
                 if parsed_date is None:
                     continue
                 trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                if start_date and end_date:
+                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                        continue
 
                 amount = safe_float_convert(row.get(mapping['amount']))
                 if amount <= 0:
@@ -879,7 +877,6 @@ def get_top_counterparties(transactions, direction, top_n=20, payment_method=Non
     return result, summary
 
 def get_combined_rank(transactions, direction, top_n=20):
-    """合并排名（不区分支付方式）"""
     filtered = [t for t in transactions if t['direction'] == direction]
     if not filtered:
         return []
@@ -908,6 +905,14 @@ def main():
         analysis_date = st.date_input("选择汇率日期（按当天中间价折算）", value=datetime.now().date())
         date_str = analysis_date.strftime("%Y-%m-%d")
         
+        # 将起始日期和结束日期放在开始分析按钮之前
+        st.subheader("📅 交易日期范围")
+        col_date1, col_date2 = st.columns(2)
+        with col_date1:
+            start_date = st.date_input("起始日期", value=datetime(2025, 1, 1))
+        with col_date2:
+            end_date = st.date_input("结束日期", value=datetime.now().date())
+        
         rank_limit = st.number_input("收款方/付款方排名显示数量", min_value=1, max_value=5000, value=20, step=1,
                                      help="设置排名前多少名，例如10、20、50。若需显示全部，可输入一个大于总交易对手方数量的大数字（如5000）")
         
@@ -916,12 +921,12 @@ def main():
                 st.error("请至少上传一个文件")
                 return
             with st.spinner("正在解析数据，请稍候..."):
-                wire_trans = load_wire_transactions(uploaded_files)
-                acceptance_payments = parse_acceptance_payments(uploaded_files)
-                acceptance_receipts = parse_acceptance_receipts(uploaded_files)
+                wire_trans = load_wire_transactions(uploaded_files, start_date=start_date, end_date=end_date)
+                acceptance_payments = parse_acceptance_payments(uploaded_files, start_date=start_date, end_date=end_date)
+                acceptance_receipts = parse_acceptance_receipts(uploaded_files, start_date=start_date, end_date=end_date)
                 all_transactions = wire_trans + acceptance_payments + acceptance_receipts
                 if not all_transactions:
-                    st.error("未解析到任何有效外部交易记录，请检查文件格式")
+                    st.error("未解析到任何有效外部交易记录，请检查文件格式或调整日期范围")
                     return
                 rates = get_exchange_rates(date_str)
                 st.sidebar.info(f"当前汇率 (CNY基准): USD={rates.get('USD',7.2)} EUR={rates.get('EUR',7.8)} HKD={rates.get('HKD',0.92)}")
@@ -929,7 +934,9 @@ def main():
                 st.session_state['transactions'] = all_transactions
                 st.session_state['rates'] = rates
                 st.session_state['rank_limit'] = rank_limit
-                st.success(f"成功解析 {len(wire_trans)} 条电汇记录 + {len(acceptance_payments)} 条银承付款 + {len(acceptance_receipts)} 条银承收款，共 {len(all_transactions)} 条交易")
+                st.session_state['start_date'] = start_date
+                st.session_state['end_date'] = end_date
+                st.success(f"成功解析 {len(wire_trans)} 条电汇记录 + {len(acceptance_payments)} 条银承付款 + {len(acceptance_receipts)} 条银承收款，共 {len(all_transactions)} 条交易（日期范围：{start_date} 至 {end_date}）")
         
         if 'transactions' not in st.session_state:
             st.info("请上传文件并点击「开始分析」")
@@ -937,18 +944,7 @@ def main():
     
     transactions = st.session_state['transactions']
     rank_limit = st.session_state.get('rank_limit', 20)
-    
-    if transactions:
-        min_date = min(t['date'] for t in transactions)
-        max_date = max(t['date'] for t in transactions)
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("起始日期", min_date, min_value=min_date, max_value=max_date)
-        with col2:
-            end_date = st.date_input("结束日期", max_date, min_value=min_date, max_value=max_date)
-        filtered = [t for t in transactions if start_date <= t['date'].date() <= end_date]
-    else:
-        filtered = transactions
+    filtered = transactions  # 已经在加载时按日期过滤，无需再次过滤
     
     if not filtered:
         st.warning("当前筛选范围内无交易数据")
