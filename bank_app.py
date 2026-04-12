@@ -594,7 +594,6 @@ def identify_acceptance_columns(df):
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
         col_str = str(col).strip().lower()
-        # 支持“出票日”、“出票日期”、“日期”
         if not mapping['date'] and any(kw in col_str for kw in ['出票日', '出票日期', '开票日期', '票据日期', '汇票日期', '日期']):
             mapping['date'] = col
         if not mapping['counterparty'] and any(kw in col_str for kw in ['收款单位', '收款人', '收款方', '收款单位名称']):
@@ -629,7 +628,7 @@ def parse_acceptance_payments(uploaded_files):
         success = False
         df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
         
-        # 策略1：尝试使用第二行作为表头（索引1，因为常见格式第一行主标题，第二行子标题）
+        # 策略1：尝试使用第二行作为表头（索引1）
         if len(df_raw) > 1:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)
             mapping = identify_acceptance_columns(df_data)
@@ -639,7 +638,7 @@ def parse_acceptance_payments(uploaded_files):
             else:
                 debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
         
-        # 策略2：如果策略1失败，尝试自动查找包含“收款单位”的行作为表头
+        # 策略2：如果失败，尝试自动查找包含“收款单位”的行
         if not success:
             header_row = None
             for i in range(min(20, len(df_raw))):
@@ -656,11 +655,10 @@ def parse_acceptance_payments(uploaded_files):
                 else:
                     debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
         
-        # 策略3：如果仍然失败，尝试使用第一行作为表头（可能列名为“日期”）
+        # 策略3：尝试使用第一行并额外匹配“日期”列
         if not success:
             df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
             mapping = identify_acceptance_columns(df_data)
-            # 如果仍未找到日期列，尝试查找列名为“日期”的列
             if not mapping['date']:
                 for col in df_data.columns:
                     if str(col).strip() == '日期':
@@ -673,7 +671,7 @@ def parse_acceptance_payments(uploaded_files):
                 debug_info.append(f"❌ {filename} - {target_sheet}: 所有策略均无法识别银承表格结构，跳过")
                 continue
 
-        # 解析每一行数据
+        # 解析数据
         for idx, row in df_data.iterrows():
             try:
                 date_val = row.get(mapping['date'])
@@ -777,8 +775,9 @@ def main():
         analysis_date = st.date_input("选择汇率日期（按当天中间价折算）", value=datetime.now().date())
         date_str = analysis_date.strftime("%Y-%m-%d")
         
-        rank_limit = st.number_input("收款方/付款方排名显示数量", min_value=1, max_value=500, value=20, step=1,
-                                     help="设置排名前多少名，例如10、20、50。若需显示全部，可输入一个大于总交易对手方数量的大数字（如500）")
+        # 修改最大限额为5000
+        rank_limit = st.number_input("收款方/付款方排名显示数量", min_value=1, max_value=5000, value=20, step=1,
+                                     help="设置排名前多少名，例如10、20、50。若需显示全部，可输入一个大于总交易对手方数量的大数字（如5000）")
         
         if st.button("🚀 开始分析", use_container_width=True):
             if not uploaded_files:
