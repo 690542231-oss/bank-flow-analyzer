@@ -462,7 +462,7 @@ def parse_sheet(df, sheet_name, mapping, sheet_currency=None, start_date=None, e
     return records
 
 def load_wire_transactions(uploaded_files, start_date=None, end_date=None):
-    """加载银行流水（电汇）交易，支持日期范围过滤"""
+    """加载银行流水（电汇）交易，支持日期范围过滤，并自动跳过工作表名包含“财司”的表格"""
     all_trans = []
     internal_companies = [
         '珠海市广通客车有限公司', '中兴智能汽车有限公司',
@@ -483,6 +483,10 @@ def load_wire_transactions(uploaded_files, start_date=None, end_date=None):
             continue
 
         for sheet_name in xls.sheet_names:
+            # 跳过工作表名包含“财司”的整个工作表
+            if '财司' in sheet_name:
+                debug_info.append(f"⏭️ {file.name} - {sheet_name}: 工作表名称包含“财司”，已跳过")
+                continue
             if any(kw in sheet_name.lower() for kw in ['保证金', '汇总', '合计', 'balance']):
                 continue
             try:
@@ -614,7 +618,7 @@ def load_wire_transactions(uploaded_files, start_date=None, end_date=None):
             st.text(info)
     return all_trans
 
-# ================= 银承付款解析（原“银承”工作表） =================
+# ================= 银承付款解析 =================
 def identify_acceptance_columns(df):
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
@@ -640,213 +644,102 @@ def parse_acceptance_payments(uploaded_files, start_date=None, end_date=None):
             st.error(f"无法读取融资报文件 {filename}: {e}")
             continue
 
-        target_sheet = None
-        for sheet in xls.sheet_names:
-            if '银承' in sheet and '收款' not in sheet and '背书' not in sheet:
-                target_sheet = sheet
-                break
-        if target_sheet is None:
-            debug_info.append(f"⚠️ {filename}: 未找到包含'银承'的工作表（付款）")
-            continue
-
-        success = False
-        df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
-        
-        if len(df_raw) > 1:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)
-            mapping = identify_acceptance_columns(df_data)
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第二行作为表头成功，映射: {mapping}")
+        for sheet_name in xls.sheet_names:
+            # 跳过工作表名包含“财司”的整个工作表
+            if '财司' in sheet_name:
+                debug_info.append(f"⏭️ {filename} - {sheet_name}: 工作表名称包含“财司”，已跳过")
+                continue
+            if '银承' in sheet_name and '收款' not in sheet_name and '背书' not in sheet_name:
+                target_sheet = sheet_name
             else:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
-        
-        if not success:
-            header_row = None
-            for i in range(min(20, len(df_raw))):
-                row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-                if any('收款单位' in cell for cell in row_cells):
-                    header_row = i
-                    break
-            if header_row is not None:
-                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+                continue
+
+            success = False
+            df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+            
+            if len(df_raw) > 1:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=1)
                 mapping = identify_acceptance_columns(df_data)
                 if mapping['date'] and mapping['counterparty'] and mapping['amount']:
                     success = True
-                    debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 使用第二行作为表头成功，映射: {mapping}")
                 else:
-                    debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
-        
-        if not success:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
-            mapping = identify_acceptance_columns(df_data)
-            if not mapping['date']:
-                for col in df_data.columns:
-                    if str(col).strip() == '日期':
-                        mapping['date'] = col
+                    debug_info.append(f"⚠️ {filename} - {target_sheet}: 第二行作为表头失败，映射缺失: {mapping}")
+            
+            if not success:
+                header_row = None
+                for i in range(min(20, len(df_raw))):
+                    row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                    if any('收款单位' in cell for cell in row_cells):
+                        header_row = i
                         break
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
-            else:
-                debug_info.append(f"❌ {filename} - {target_sheet}: 所有策略均无法识别银承表格结构，跳过")
-                continue
-
-        for idx, row in df_data.iterrows():
-            try:
-                date_val = row.get(mapping['date'])
-                parsed_date = parse_date_cell(date_val)
-                if parsed_date is None:
+                if header_row is not None:
+                    df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+                    mapping = identify_acceptance_columns(df_data)
+                    if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                        success = True
+                        debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+                    else:
+                        debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+            
+            if not success:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
+                mapping = identify_acceptance_columns(df_data)
+                if not mapping['date']:
+                    for col in df_data.columns:
+                        if str(col).strip() == '日期':
+                            mapping['date'] = col
+                            break
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"❌ {filename} - {target_sheet}: 所有策略均无法识别银承表格结构，跳过")
                     continue
-                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
-                if start_date and end_date:
-                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+
+            for idx, row in df_data.iterrows():
+                try:
+                    date_val = row.get(mapping['date'])
+                    parsed_date = parse_date_cell(date_val)
+                    if parsed_date is None:
+                        continue
+                    trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                    if start_date and end_date:
+                        if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                            continue
+
+                    amount = safe_float_convert(row.get(mapping['amount']))
+                    if amount <= 0:
                         continue
 
-                amount = safe_float_convert(row.get(mapping['amount']))
-                if amount <= 0:
+                    counterparty = str(row.get(mapping['counterparty'])).strip()
+                    if not counterparty or counterparty.lower() in ('nan', 'none', ''):
+                        continue
+
+                    acceptance_records.append({
+                        'date': trans_datetime,
+                        'amount': amount,
+                        'direction': 'out',
+                        'counterparty': counterparty,
+                        'currency': 'CNY',
+                        'remark': '银承付款',
+                        'purpose': '',
+                        'original_sheet': f"{filename} - {target_sheet}",
+                        'payment_method': 'acceptance_payment'
+                    })
+                except Exception as e:
+                    st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
                     continue
 
-                counterparty = str(row.get(mapping['counterparty'])).strip()
-                if not counterparty or counterparty.lower() in ('nan', 'none', ''):
-                    continue
-
-                acceptance_records.append({
-                    'date': trans_datetime,
-                    'amount': amount,
-                    'direction': 'out',
-                    'counterparty': counterparty,
-                    'currency': 'CNY',
-                    'remark': '银承付款',
-                    'purpose': '',
-                    'original_sheet': f"{filename} - {target_sheet}",
-                    'payment_method': 'acceptance_payment'
-                })
-            except Exception as e:
-                st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
-                continue
-
-        if acceptance_records:
-            st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承付款记录")
-        else:
-            st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承记录")
+            if acceptance_records:
+                st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承付款记录")
+            else:
+                st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承记录")
 
     with st.sidebar.expander("🔧 调试信息（银承付款）", expanded=False):
         for info in debug_info:
             st.text(info)
     return acceptance_records
-
-# ================= 新增：银承背书解析（纳入银承付款） =================
-def identify_acceptance_endorsement_columns(df):
-    """识别银承背书表格的列名：处理日期、被背书人、处理金额"""
-    mapping = {'date': None, 'counterparty': None, 'amount': None}
-    for col in df.columns:
-        col_str = str(col).strip().lower()
-        if not mapping['date'] and any(kw in col_str for kw in ['处理日期', '日期', '背书日期']):
-            mapping['date'] = col
-        if not mapping['counterparty'] and any(kw in col_str for kw in ['被背书人', '背书人', '对方名称']):
-            mapping['counterparty'] = col
-        if not mapping['amount'] and any(kw in col_str for kw in ['处理金额', '金额', '背书金额']):
-            mapping['amount'] = col
-    return mapping
-
-def parse_acceptance_endorsements(uploaded_files, start_date=None, end_date=None):
-    """解析融资报文件中的银承背书记录，作为付款纳入统计"""
-    endorsement_records = []
-    debug_info = []
-    for file in uploaded_files:
-        filename = file.name
-        if '融资报' not in filename:
-            continue
-        try:
-            xls = pd.ExcelFile(file)
-        except Exception as e:
-            st.error(f"无法读取融资报文件 {filename}: {e}")
-            continue
-
-        target_sheet = None
-        for sheet in xls.sheet_names:
-            if '银承背书' in sheet:
-                target_sheet = sheet
-                break
-        if target_sheet is None:
-            debug_info.append(f"⚠️ {filename}: 未找到'银承背书'工作表")
-            continue
-
-        success = False
-        df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
-        
-        # 策略1：自动查找包含“被背书人”的行作为表头
-        header_row = None
-        for i in range(min(20, len(df_raw))):
-            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-            if any('被背书人' in cell for cell in row_cells):
-                header_row = i
-                break
-        if header_row is not None:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
-            mapping = identify_acceptance_endorsement_columns(df_data)
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
-            else:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
-        
-        # 策略2：尝试使用第一行作为表头
-        if not success:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
-            mapping = identify_acceptance_endorsement_columns(df_data)
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
-            else:
-                debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承背书表格结构，跳过")
-                continue
-
-        # 解析数据
-        for idx, row in df_data.iterrows():
-            try:
-                date_val = row.get(mapping['date'])
-                parsed_date = parse_date_cell(date_val)
-                if parsed_date is None:
-                    continue
-                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
-                if start_date and end_date:
-                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
-                        continue
-
-                amount = safe_float_convert(row.get(mapping['amount']))
-                if amount <= 0:
-                    continue
-
-                counterparty = str(row.get(mapping['counterparty'])).strip()
-                if not counterparty or counterparty.lower() in ('nan', 'none', ''):
-                    continue
-
-                endorsement_records.append({
-                    'date': trans_datetime,
-                    'amount': amount,
-                    'direction': 'out',
-                    'counterparty': counterparty,
-                    'currency': 'CNY',
-                    'remark': '银承背书',
-                    'purpose': '',
-                    'original_sheet': f"{filename} - {target_sheet}",
-                    'payment_method': 'acceptance_payment'   # 与银承付款合并统计
-                })
-            except Exception as e:
-                st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
-                continue
-
-        if endorsement_records:
-            st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in endorsement_records if r['original_sheet'].startswith(filename)])} 条银承背书记录")
-        else:
-            st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承背书记录")
-
-    with st.sidebar.expander("🔧 调试信息（银承背书）", expanded=False):
-        for info in debug_info:
-            st.text(info)
-    return endorsement_records
 
 # ================= 银承收款解析 =================
 def identify_acceptance_receipt_columns(df):
@@ -874,86 +767,195 @@ def parse_acceptance_receipts(uploaded_files, start_date=None, end_date=None):
             st.error(f"无法读取融资报文件 {filename}: {e}")
             continue
 
-        target_sheet = None
-        for sheet in xls.sheet_names:
-            if '银承收款' in sheet:
-                target_sheet = sheet
-                break
-        if target_sheet is None:
-            debug_info.append(f"⚠️ {filename}: 未找到'银承收款'工作表")
-            continue
-
-        success = False
-        df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
-        
-        header_row = None
-        for i in range(min(20, len(df_raw))):
-            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
-            if any('付款人' in cell for cell in row_cells):
-                header_row = i
-                break
-        if header_row is not None:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
-            mapping = identify_acceptance_receipt_columns(df_data)
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+        for sheet_name in xls.sheet_names:
+            # 跳过工作表名包含“财司”的整个工作表
+            if '财司' in sheet_name:
+                debug_info.append(f"⏭️ {filename} - {sheet_name}: 工作表名称包含“财司”，已跳过")
+                continue
+            if '银承收款' in sheet_name:
+                target_sheet = sheet_name
             else:
-                debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
-        
-        if not success:
-            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
-            mapping = identify_acceptance_receipt_columns(df_data)
-            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
-                success = True
-                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
-            else:
-                debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承收款表格结构，跳过")
                 continue
 
-        for idx, row in df_data.iterrows():
-            try:
-                date_val = row.get(mapping['date'])
-                parsed_date = parse_date_cell(date_val)
-                if parsed_date is None:
+            success = False
+            df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+            
+            header_row = None
+            for i in range(min(20, len(df_raw))):
+                row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                if any('付款人' in cell for cell in row_cells):
+                    header_row = i
+                    break
+            if header_row is not None:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+                mapping = identify_acceptance_receipt_columns(df_data)
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+            
+            if not success:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
+                mapping = identify_acceptance_receipt_columns(df_data)
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承收款表格结构，跳过")
                     continue
-                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
-                if start_date and end_date:
-                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+
+            for idx, row in df_data.iterrows():
+                try:
+                    date_val = row.get(mapping['date'])
+                    parsed_date = parse_date_cell(date_val)
+                    if parsed_date is None:
+                        continue
+                    trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                    if start_date and end_date:
+                        if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                            continue
+
+                    amount = safe_float_convert(row.get(mapping['amount']))
+                    if amount <= 0:
                         continue
 
-                amount = safe_float_convert(row.get(mapping['amount']))
-                if amount <= 0:
+                    counterparty = str(row.get(mapping['counterparty'])).strip()
+                    if not counterparty or counterparty.lower() in ('nan', 'none', ''):
+                        continue
+
+                    acceptance_records.append({
+                        'date': trans_datetime,
+                        'amount': amount,
+                        'direction': 'in',
+                        'counterparty': counterparty,
+                        'currency': 'CNY',
+                        'remark': '银承收款',
+                        'purpose': '',
+                        'original_sheet': f"{filename} - {target_sheet}",
+                        'payment_method': 'acceptance_receipt'
+                    })
+                except Exception as e:
+                    st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
                     continue
 
-                counterparty = str(row.get(mapping['counterparty'])).strip()
-                if not counterparty or counterparty.lower() in ('nan', 'none', ''):
-                    continue
-
-                acceptance_records.append({
-                    'date': trans_datetime,
-                    'amount': amount,
-                    'direction': 'in',
-                    'counterparty': counterparty,
-                    'currency': 'CNY',
-                    'remark': '银承收款',
-                    'purpose': '',
-                    'original_sheet': f"{filename} - {target_sheet}",
-                    'payment_method': 'acceptance_receipt'
-                })
-            except Exception as e:
-                st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
-                continue
-
-        if acceptance_records:
-            st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承收款记录")
-        else:
-            st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承收款记录")
+            if acceptance_records:
+                st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in acceptance_records if r['original_sheet'].startswith(filename)])} 条银承收款记录")
+            else:
+                st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承收款记录")
 
     with st.sidebar.expander("🔧 调试信息（银承收款）", expanded=False):
         for info in debug_info:
             st.text(info)
     return acceptance_records
+
+# ================= 银承背书解析（纳入付款） =================
+def identify_acceptance_endorsement_columns(df):
+    mapping = {'date': None, 'counterparty': None, 'amount': None}
+    for col in df.columns:
+        col_str = str(col).strip().lower()
+        if not mapping['date'] and any(kw in col_str for kw in ['处理日期', '日期', '背书日期']):
+            mapping['date'] = col
+        if not mapping['counterparty'] and any(kw in col_str for kw in ['被背书人', '背书人', '对方名称']):
+            mapping['counterparty'] = col
+        if not mapping['amount'] and any(kw in col_str for kw in ['处理金额', '金额', '背书金额']):
+            mapping['amount'] = col
+    return mapping
+
+def parse_acceptance_endorsements(uploaded_files, start_date=None, end_date=None):
+    endorsement_records = []
+    debug_info = []
+    for file in uploaded_files:
+        filename = file.name
+        if '融资报' not in filename:
+            continue
+        try:
+            xls = pd.ExcelFile(file)
+        except Exception as e:
+            st.error(f"无法读取融资报文件 {filename}: {e}")
+            continue
+
+        for sheet_name in xls.sheet_names:
+            # 跳过工作表名包含“财司”的整个工作表
+            if '财司' in sheet_name:
+                debug_info.append(f"⏭️ {filename} - {sheet_name}: 工作表名称包含“财司”，已跳过")
+                continue
+            if '银承背书' in sheet_name:
+                target_sheet = sheet_name
+            else:
+                continue
+
+            success = False
+            df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+            
+            header_row = None
+            for i in range(min(20, len(df_raw))):
+                row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+                if any('被背书人' in cell for cell in row_cells):
+                    header_row = i
+                    break
+            if header_row is not None:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+                mapping = identify_acceptance_endorsement_columns(df_data)
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+            
+            if not success:
+                df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
+                mapping = identify_acceptance_endorsement_columns(df_data)
+                if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                    success = True
+                    debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
+                else:
+                    debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承背书表格结构，跳过")
+                    continue
+
+            for idx, row in df_data.iterrows():
+                try:
+                    date_val = row.get(mapping['date'])
+                    parsed_date = parse_date_cell(date_val)
+                    if parsed_date is None:
+                        continue
+                    trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                    if start_date and end_date:
+                        if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                            continue
+
+                    amount = safe_float_convert(row.get(mapping['amount']))
+                    if amount <= 0:
+                        continue
+
+                    counterparty = str(row.get(mapping['counterparty'])).strip()
+                    if not counterparty or counterparty.lower() in ('nan', 'none', ''):
+                        continue
+
+                    endorsement_records.append({
+                        'date': trans_datetime,
+                        'amount': amount,
+                        'direction': 'out',
+                        'counterparty': counterparty,
+                        'currency': 'CNY',
+                        'remark': '银承背书',
+                        'purpose': '',
+                        'original_sheet': f"{filename} - {target_sheet}",
+                        'payment_method': 'acceptance_payment'
+                    })
+                except Exception as e:
+                    st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
+                    continue
+
+            if endorsement_records:
+                st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in endorsement_records if r['original_sheet'].startswith(filename)])} 条银承背书记录")
+            else:
+                st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承背书记录")
+
+    with st.sidebar.expander("🔧 调试信息（银承背书）", expanded=False):
+        for info in debug_info:
+            st.text(info)
+    return endorsement_records
 # =====================================================
 
 def convert_to_cny(transactions, rates):
@@ -1005,12 +1007,13 @@ def get_combined_rank(transactions, direction, top_n=20):
 
 def main():
     st.markdown('<div class="main-header">🏦 银行流水及银承收付智能分析平台</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">多银行格式自动适配 | 排除内部交易 | 电汇&银承合并分析 | 收付全貌</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">多银行格式自动适配 | 排除内部交易 | 自动跳过“财司”工作表 | 电汇&银承合并分析 | 收付全貌</div>', unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("📂 数据上传")
         st.markdown("**支持的文件格式：** XLSX, XLS（每个文件不超过200MB）")
         st.markdown("**银承识别：** 文件名包含“融资报”且工作表名包含“银承”的表格将自动解析为银承付款；工作表名包含“银承收款”自动解析为银承收款（收款方取“付款人”列）；工作表名包含“银承背书”自动解析为银承背书（纳入付款统计）。")
+        st.markdown("**自动跳过：** 任何工作表名包含“财司”的表格将被完全忽略，不纳入任何统计。")
         uploaded_files = st.file_uploader("请选择银行流水Excel文件（可多选）", type=['xlsx', 'xls'], accept_multiple_files=True, label_visibility="collapsed")
         
         st.header("⚙️ 参数设置")
