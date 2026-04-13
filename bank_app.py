@@ -614,7 +614,7 @@ def load_wire_transactions(uploaded_files, start_date=None, end_date=None):
             st.text(info)
     return all_trans
 
-# ================= 银承付款解析 =================
+# ================= 银承付款解析（原“银承”工作表） =================
 def identify_acceptance_columns(df):
     mapping = {'date': None, 'counterparty': None, 'amount': None}
     for col in df.columns:
@@ -642,7 +642,7 @@ def parse_acceptance_payments(uploaded_files, start_date=None, end_date=None):
 
         target_sheet = None
         for sheet in xls.sheet_names:
-            if '银承' in sheet and '收款' not in sheet:
+            if '银承' in sheet and '收款' not in sheet and '背书' not in sheet:
                 target_sheet = sheet
                 break
         if target_sheet is None:
@@ -735,6 +735,118 @@ def parse_acceptance_payments(uploaded_files, start_date=None, end_date=None):
         for info in debug_info:
             st.text(info)
     return acceptance_records
+
+# ================= 新增：银承背书解析（纳入银承付款） =================
+def identify_acceptance_endorsement_columns(df):
+    """识别银承背书表格的列名：处理日期、被背书人、处理金额"""
+    mapping = {'date': None, 'counterparty': None, 'amount': None}
+    for col in df.columns:
+        col_str = str(col).strip().lower()
+        if not mapping['date'] and any(kw in col_str for kw in ['处理日期', '日期', '背书日期']):
+            mapping['date'] = col
+        if not mapping['counterparty'] and any(kw in col_str for kw in ['被背书人', '背书人', '对方名称']):
+            mapping['counterparty'] = col
+        if not mapping['amount'] and any(kw in col_str for kw in ['处理金额', '金额', '背书金额']):
+            mapping['amount'] = col
+    return mapping
+
+def parse_acceptance_endorsements(uploaded_files, start_date=None, end_date=None):
+    """解析融资报文件中的银承背书记录，作为付款纳入统计"""
+    endorsement_records = []
+    debug_info = []
+    for file in uploaded_files:
+        filename = file.name
+        if '融资报' not in filename:
+            continue
+        try:
+            xls = pd.ExcelFile(file)
+        except Exception as e:
+            st.error(f"无法读取融资报文件 {filename}: {e}")
+            continue
+
+        target_sheet = None
+        for sheet in xls.sheet_names:
+            if '银承背书' in sheet:
+                target_sheet = sheet
+                break
+        if target_sheet is None:
+            debug_info.append(f"⚠️ {filename}: 未找到'银承背书'工作表")
+            continue
+
+        success = False
+        df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+        
+        # 策略1：自动查找包含“被背书人”的行作为表头
+        header_row = None
+        for i in range(min(20, len(df_raw))):
+            row_cells = [str(cell).strip() for cell in df_raw.iloc[i]]
+            if any('被背书人' in cell for cell in row_cells):
+                header_row = i
+                break
+        if header_row is not None:
+            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=header_row)
+            mapping = identify_acceptance_endorsement_columns(df_data)
+            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                success = True
+                debug_info.append(f"✅ {filename} - {target_sheet}: 自动检测表头行 {header_row} 成功，映射: {mapping}")
+            else:
+                debug_info.append(f"⚠️ {filename} - {target_sheet}: 自动检测表头行 {header_row} 失败，映射缺失: {mapping}")
+        
+        # 策略2：尝试使用第一行作为表头
+        if not success:
+            df_data = pd.read_excel(xls, sheet_name=target_sheet, header=0)
+            mapping = identify_acceptance_endorsement_columns(df_data)
+            if mapping['date'] and mapping['counterparty'] and mapping['amount']:
+                success = True
+                debug_info.append(f"✅ {filename} - {target_sheet}: 使用第一行作为表头成功，映射: {mapping}")
+            else:
+                debug_info.append(f"❌ {filename} - {target_sheet}: 无法识别银承背书表格结构，跳过")
+                continue
+
+        # 解析数据
+        for idx, row in df_data.iterrows():
+            try:
+                date_val = row.get(mapping['date'])
+                parsed_date = parse_date_cell(date_val)
+                if parsed_date is None:
+                    continue
+                trans_datetime = datetime.combine(parsed_date, datetime.min.time())
+                if start_date and end_date:
+                    if trans_datetime.date() < start_date or trans_datetime.date() > end_date:
+                        continue
+
+                amount = safe_float_convert(row.get(mapping['amount']))
+                if amount <= 0:
+                    continue
+
+                counterparty = str(row.get(mapping['counterparty'])).strip()
+                if not counterparty or counterparty.lower() in ('nan', 'none', ''):
+                    continue
+
+                endorsement_records.append({
+                    'date': trans_datetime,
+                    'amount': amount,
+                    'direction': 'out',
+                    'counterparty': counterparty,
+                    'currency': 'CNY',
+                    'remark': '银承背书',
+                    'purpose': '',
+                    'original_sheet': f"{filename} - {target_sheet}",
+                    'payment_method': 'acceptance_payment'   # 与银承付款合并统计
+                })
+            except Exception as e:
+                st.warning(f"跳过 {filename} {target_sheet} 第 {idx} 行，解析失败: {e}")
+                continue
+
+        if endorsement_records:
+            st.success(f"✓ {filename} - {target_sheet}: 解析到 {len([r for r in endorsement_records if r['original_sheet'].startswith(filename)])} 条银承背书记录")
+        else:
+            st.info(f"ℹ️ {filename} - {target_sheet}: 未解析到有效银承背书记录")
+
+    with st.sidebar.expander("🔧 调试信息（银承背书）", expanded=False):
+        for info in debug_info:
+            st.text(info)
+    return endorsement_records
 
 # ================= 银承收款解析 =================
 def identify_acceptance_receipt_columns(df):
@@ -898,14 +1010,13 @@ def main():
     with st.sidebar:
         st.header("📂 数据上传")
         st.markdown("**支持的文件格式：** XLSX, XLS（每个文件不超过200MB）")
-        st.markdown("**银承识别：** 文件名包含“融资报”且工作表名包含“银承”的表格将自动解析为银承付款；工作表名包含“银承收款”自动解析为银承收款（收款方取“付款人”列）。")
+        st.markdown("**银承识别：** 文件名包含“融资报”且工作表名包含“银承”的表格将自动解析为银承付款；工作表名包含“银承收款”自动解析为银承收款（收款方取“付款人”列）；工作表名包含“银承背书”自动解析为银承背书（纳入付款统计）。")
         uploaded_files = st.file_uploader("请选择银行流水Excel文件（可多选）", type=['xlsx', 'xls'], accept_multiple_files=True, label_visibility="collapsed")
         
         st.header("⚙️ 参数设置")
         analysis_date = st.date_input("选择汇率日期（按当天中间价折算）", value=datetime.now().date())
         date_str = analysis_date.strftime("%Y-%m-%d")
         
-        # 将起始日期和结束日期放在开始分析按钮之前
         st.subheader("📅 交易日期范围")
         col_date1, col_date2 = st.columns(2)
         with col_date1:
@@ -923,8 +1034,9 @@ def main():
             with st.spinner("正在解析数据，请稍候..."):
                 wire_trans = load_wire_transactions(uploaded_files, start_date=start_date, end_date=end_date)
                 acceptance_payments = parse_acceptance_payments(uploaded_files, start_date=start_date, end_date=end_date)
+                acceptance_endorsements = parse_acceptance_endorsements(uploaded_files, start_date=start_date, end_date=end_date)
                 acceptance_receipts = parse_acceptance_receipts(uploaded_files, start_date=start_date, end_date=end_date)
-                all_transactions = wire_trans + acceptance_payments + acceptance_receipts
+                all_transactions = wire_trans + acceptance_payments + acceptance_endorsements + acceptance_receipts
                 if not all_transactions:
                     st.error("未解析到任何有效外部交易记录，请检查文件格式或调整日期范围")
                     return
@@ -936,7 +1048,7 @@ def main():
                 st.session_state['rank_limit'] = rank_limit
                 st.session_state['start_date'] = start_date
                 st.session_state['end_date'] = end_date
-                st.success(f"成功解析 {len(wire_trans)} 条电汇记录 + {len(acceptance_payments)} 条银承付款 + {len(acceptance_receipts)} 条银承收款，共 {len(all_transactions)} 条交易（日期范围：{start_date} 至 {end_date}）")
+                st.success(f"成功解析 {len(wire_trans)} 条电汇记录 + {len(acceptance_payments)+len(acceptance_endorsements)} 条银承付款（含背书） + {len(acceptance_receipts)} 条银承收款，共 {len(all_transactions)} 条交易（日期范围：{start_date} 至 {end_date}）")
         
         if 'transactions' not in st.session_state:
             st.info("请上传文件并点击「开始分析」")
@@ -944,7 +1056,7 @@ def main():
     
     transactions = st.session_state['transactions']
     rank_limit = st.session_state.get('rank_limit', 20)
-    filtered = transactions  # 已经在加载时按日期过滤，无需再次过滤
+    filtered = transactions
     
     if not filtered:
         st.warning("当前筛选范围内无交易数据")
